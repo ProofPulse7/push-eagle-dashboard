@@ -1,7 +1,7 @@
 'use client';
 
 import { useSettings } from '@/context/settings-context';
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -38,7 +38,7 @@ interface DiagnosticResult {
   }>;
 }
 
-export default function DiagnosticPage() {
+function DiagnosticPageContent() {
   const { shopDomain } = useSettings();
   const searchParams = useSearchParams();
   const paramShop = searchParams.get('shop');
@@ -305,5 +305,24 @@ export default function DiagnosticPage() {
         </>
       )}
     </div>
+  );
+}
+
+export default function DiagnosticPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="p-6">
+          <Card>
+            <CardContent className="flex items-center justify-center py-8">
+              <Loader2 className="w-6 h-6 animate-spin mr-2" />
+              Loading diagnostic page...
+            </CardContent>
+          </Card>
+        </div>
+      }
+    >
+      <DiagnosticPageContent />
+    </Suspense>
   );
 }
