@@ -1,0 +1,13 @@
+{
+  "framework": "nextjs",
+  "crons": [
+    {
+      "path": "/api/cron/process-campaigns",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/process-automations",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
