@@ -3,7 +3,7 @@ import { createContext, useState, useContext, ReactNode, useEffect, useRef } fro
 import { useSettings } from '@/context/settings-context';
 
 type ActionButton = { title: string; link: string };
-type ImageValue = { file: File | null; preview: string | null; originalPreview: string | null };
+type ImageValue = { file: File | null; preview: string | null; originalPreview?: string | null };
 
 export interface CampaignContextType {
     title: string;
@@ -53,6 +53,24 @@ export interface CampaignContextType {
 
 export const CampaignContext = createContext<CampaignContextType | undefined>(undefined);
 
+const normalizeTrackedLink = (value: string | null | undefined) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) {
+        return '';
+    }
+
+    try {
+        const parsed = new URL(raw);
+        if (parsed.pathname === '/api/track/click' || parsed.pathname === '/api/track/automation-click') {
+            return parsed.searchParams.get('u') || raw;
+        }
+    } catch {
+        return raw;
+    }
+
+    return raw;
+};
+
 export function useCampaignState() {
     const context = useContext(CampaignContext);
     if (!context) {
@@ -70,7 +88,7 @@ export function CampaignStateProvider({ children }: { children: ReactNode }) {
     const [windowsHero, setWindowsHero] = useState<ImageValue>({ file: null, preview: null, originalPreview: null });
     const [macHero, setMacHero] = useState<ImageValue>({ file: null, preview: null, originalPreview: null });
     const [androidHero, setAndroidHero] = useState<ImageValue>({ file: null, preview: null, originalPreview: null });
-    const { logo, setLogo } = useSettings();
+    const { storeUrl, shopDomain, logo, setLogo } = useSettings();
     const [sendingOption, setSendingOption] = useState('now');
     const [scheduledDate, setScheduledDate] = useState<Date | undefined>(new Date());
     const [scheduledTime, setScheduledTime] = useState('10:00 AM');
@@ -86,6 +104,25 @@ export function CampaignStateProvider({ children }: { children: ReactNode }) {
     const [flashSaleUrgencyText, setFlashSaleUrgencyText] = useState('⏰ Limited time offer!');
     // Recurring
     const [recurringPattern, setRecurringPattern] = useState('');
+
+    useEffect(() => {
+        if (primaryLink) {
+            const normalized = normalizeTrackedLink(primaryLink);
+            if (normalized !== primaryLink) {
+                setPrimaryLink(normalized);
+                return;
+            }
+        }
+
+        if (primaryLink) {
+            return;
+        }
+
+        const fallbackStoreUrl = storeUrl || (shopDomain ? `https://${shopDomain}` : '');
+        if (fallbackStoreUrl) {
+            setPrimaryLink(fallbackStoreUrl);
+        }
+    }, [primaryLink, storeUrl, shopDomain]);
 
     const value: CampaignContextType = {
         title, setTitle,

@@ -3,6 +3,9 @@ import { createHash, randomUUID } from 'crypto';
 import { env } from '@/lib/config/env';
 import { getNeonSql } from '@/lib/integrations/database/neon';
 import { getFirebaseAdminMessaging } from '@/lib/integrations/firebase/admin';
+import { sendVapidPushNotification } from '@/lib/integrations/firebase/vapid';
+import { recordPixelEvent } from '@/lib/server/automation/pixel-events';
+import { deleteImageFromR2 } from '@/lib/server/media/r2';
 
 type CreateCampaignInput = {
   shopDomain: string;
@@ -31,6 +34,11 @@ type UpsertTokenInput = {
   city?: string | null;
   userAgent?: string | null;
   deviceContext?: Record<string, unknown> | null;
+  /** For VAPID (Firefox / Safari) subscriptions */
+  tokenType?: 'fcm' | 'vapid';
+  vapidEndpoint?: string | null;
+  vapidP256dh?: string | null;
+  vapidAuth?: string | null;
 };
 
 type UpdateAttributionSettingsInput = {
@@ -66,6 +74,28 @@ type OptInSettings = {
 type UpdateOptInSettingsInput = {
   shopDomain: string;
 } & OptInSettings;
+
+type PrivacySettings = {
+  allowSupport: boolean;
+  ipAddressOption: 'anonymized' | 'no-ip';
+  enableGeo: boolean;
+  enablePreferences: boolean;
+  emailStoreOption: 'full-email' | 'hash-email' | 'no-email';
+  locationStoreOption: 'yes' | 'no';
+  nameStoreOption: 'yes' | 'no';
+};
+
+type UpdatePrivacySettingsInput = {
+  shopDomain: string;
+} & PrivacySettings;
+
+type BrandingSettings = {
+  logoUrl: string | null;
+};
+
+type UpdateBrandingSettingsInput = {
+  shopDomain: string;
+} & BrandingSettings;
 
 type RecordIosHomeScreenInput = {
   shopDomain: string;
@@ -153,6 +183,9 @@ type AutomationJobPayload = {
   targetUrl?: string | null;
   iconUrl?: string | null;
   imageUrl?: string | null;
+  windowsImageUrl?: string | null;
+  macosImageUrl?: string | null;
+  androidImageUrl?: string | null;
   campaignLabel?: string | null;
   ruleKey?: AutomationRuleKey | null;
   externalId?: string | null;
@@ -162,6 +195,90 @@ type AutomationJobPayload = {
   orderId?: string | null;
   triggeredAt?: string | null;
   metadata?: Record<string, unknown> | null;
+};
+
+type WelcomeStepKey = 'reminder-1' | 'reminder-2' | 'reminder-3';
+
+type WelcomeStepConfig = {
+  enabled: boolean;
+  delayMinutes: number;
+  title: string;
+  body: string;
+  targetUrl?: string | null;
+  iconUrl?: string | null;
+  imageUrl?: string | null;
+  windowsImageUrl?: string | null;
+  macosImageUrl?: string | null;
+  androidImageUrl?: string | null;
+  actionButtons?: Array<{ title: string; link: string }>;
+};
+
+type WelcomeRuleConfig = {
+  steps: Record<WelcomeStepKey, WelcomeStepConfig>;
+};
+
+type CartStepKey = 'cart-reminder-1' | 'cart-reminder-2' | 'cart-reminder-3';
+
+type CartRuleConfig = {
+  steps: Record<CartStepKey, WelcomeStepConfig>;
+};
+
+type BrowseStepKey = 'browse-reminder-1' | 'browse-reminder-2' | 'browse-reminder-3';
+
+type BrowseRuleConfig = {
+  steps: Record<BrowseStepKey, WelcomeStepConfig>;
+};
+
+type ShippingStepKey = 'shipping-1';
+
+type ShippingRuleConfig = {
+  sendWhen: string[];
+  steps: Record<ShippingStepKey, WelcomeStepConfig>;
+};
+
+type BackInStockStepKey = 'stock-1';
+
+type BackInStockRuleConfig = {
+  steps: Record<BackInStockStepKey, WelcomeStepConfig>;
+};
+
+type PriceDropStepKey = 'price-1';
+
+type PriceDropRuleConfig = {
+  steps: Record<PriceDropStepKey, WelcomeStepConfig>;
+};
+
+type IngestionJobType = 'pixel_event' | 'shopify_order_create';
+
+type PixelIngestionPayload = {
+  shopDomain: string;
+  externalId: string;
+  eventType: 'page_view' | 'product_view' | 'add_to_cart' | 'checkout_start';
+  pageUrl?: string | null;
+  productId?: string | null;
+  cartToken?: string | null;
+  clientId?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+type OrderCreateIngestionPayload = {
+  shopDomain: string;
+  orderId: string;
+  externalId?: string | null;
+  customerId?: string | null;
+  email?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  customerTags?: string[] | null;
+  totalPriceCents: number;
+  createdAt?: string | null;
+  lineItems?: Array<{
+    productId?: string | null;
+    productTitle?: string | null;
+    collectionHint?: string | null;
+  }>;
+  landingSite?: string | null;
+  userAgent?: string | null;
 };
 
 type UpsertMerchantProfileInput = {
@@ -300,6 +417,16 @@ const defaultOptInSettings: OptInSettings = {
   iosWidgetEnabled: true,
   iosWidgetTitle: 'Get notifications on your iPhone or iPad',
   iosWidgetMessage: 'Add this store to your Home Screen. When you open it from there, we will ask for notification permission using your saved prompt settings.',
+};
+
+const defaultPrivacySettings: PrivacySettings = {
+  allowSupport: true,
+  ipAddressOption: 'anonymized',
+  enableGeo: true,
+  enablePreferences: false,
+  emailStoreOption: 'full-email',
+  locationStoreOption: 'yes',
+  nameStoreOption: 'yes',
 };
 
 const parseScopes = (value?: string | null) =>
@@ -466,6 +593,9 @@ const ensureSchema = async () => {
         data_base64 TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
+      await sql`ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS object_key TEXT`;
+      await sql`ALTER TABLE media_assets ADD COLUMN IF NOT EXISTS public_url TEXT`;
+      await sql`ALTER TABLE media_assets ALTER COLUMN data_base64 DROP NOT NULL`;
 
       await sql`CREATE TABLE IF NOT EXISTS merchant_settings (
         shop_domain TEXT PRIMARY KEY REFERENCES merchants(shop_domain) ON DELETE CASCADE,
@@ -495,6 +625,21 @@ const ensureSchema = async () => {
       await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS ios_widget_enabled BOOLEAN NOT NULL DEFAULT TRUE`;
       await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS ios_widget_title TEXT`;
       await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS ios_widget_message TEXT`;
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS support_tools_enabled BOOLEAN NOT NULL DEFAULT TRUE`;
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS ip_address_option TEXT NOT NULL DEFAULT 'anonymized'`;
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS geo_location_enabled BOOLEAN NOT NULL DEFAULT TRUE`;
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS notification_preferences_enabled BOOLEAN NOT NULL DEFAULT FALSE`;
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS email_store_option TEXT NOT NULL DEFAULT 'full-email'`;
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS location_store_option TEXT NOT NULL DEFAULT 'yes'`;
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS name_store_option TEXT NOT NULL DEFAULT 'yes'`;
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS brand_logo_url TEXT`;
+
+      // VAPID / cross-browser Web Push columns on subscriber_tokens
+      // token_type: 'fcm' (Chrome/Edge/Opera/Samsung) or 'vapid' (Firefox/Safari)
+      await sql`ALTER TABLE subscriber_tokens ADD COLUMN IF NOT EXISTS token_type TEXT NOT NULL DEFAULT 'fcm'`;
+      await sql`ALTER TABLE subscriber_tokens ADD COLUMN IF NOT EXISTS vapid_endpoint TEXT`;
+      await sql`ALTER TABLE subscriber_tokens ADD COLUMN IF NOT EXISTS vapid_p256dh TEXT`;
+      await sql`ALTER TABLE subscriber_tokens ADD COLUMN IF NOT EXISTS vapid_auth TEXT`;
 
       await sql`CREATE TABLE IF NOT EXISTS campaign_deliveries (
         id BIGSERIAL PRIMARY KEY,
@@ -654,6 +799,21 @@ const ensureSchema = async () => {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
 
+      await sql`CREATE TABLE IF NOT EXISTS ingestion_jobs (
+        id TEXT PRIMARY KEY,
+        shop_domain TEXT NOT NULL REFERENCES merchants(shop_domain) ON DELETE CASCADE,
+        job_type TEXT NOT NULL,
+        dedupe_key TEXT,
+        payload JSONB NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error_message TEXT,
+        due_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        processed_at TIMESTAMPTZ
+      )`;
+
       await sql`CREATE TABLE IF NOT EXISTS campaign_schedules (
         id TEXT PRIMARY KEY,
         campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -763,6 +923,9 @@ const ensureSchema = async () => {
       await sql`CREATE INDEX IF NOT EXISTS idx_campaigns_shop_scheduled ON campaigns(shop_domain, status, scheduled_at)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_pixel_events_shop_created ON pixel_events(shop_domain, created_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_pixel_events_shop_external ON pixel_events(shop_domain, external_id, created_at DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_due ON ingestion_jobs(status, due_at)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_shop_type ON ingestion_jobs(shop_domain, job_type, status, due_at)`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_ingestion_jobs_dedupe ON ingestion_jobs(shop_domain, job_type, dedupe_key) WHERE dedupe_key IS NOT NULL`;
       await sql`CREATE INDEX IF NOT EXISTS idx_campaign_schedules_send_at ON campaign_schedules(send_at) WHERE send_at IS NOT NULL`;
       await sql`CREATE INDEX IF NOT EXISTS idx_smart_delivery_metrics_shop ON smart_delivery_metrics(shop_domain)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_campaign_deliveries_campaign ON campaign_deliveries(campaign_id)`;
@@ -800,8 +963,8 @@ const ensureSchema = async () => {
 const buildTrackedUrl = (
   targetUrl: string | null | undefined,
   campaignId: string,
-  shopDomain: string,
-  externalId?: string | null,
+  _shopDomain: string,
+  _externalId?: string | null,
   contentLabel?: string | null,
 ) => {
   if (!targetUrl) {
@@ -809,55 +972,480 @@ const buildTrackedUrl = (
   }
 
   try {
-    const target = new URL(targetUrl);
+    const target = new URL(unwrapTrackingRedirectUrl(targetUrl));
     target.searchParams.set('utm_source', 'push_eagle');
     target.searchParams.set('utm_medium', 'web_push');
     target.searchParams.set('utm_campaign', campaignId);
     if (contentLabel) {
       target.searchParams.set('utm_content', contentLabel);
     }
+    return target.toString();
+  } catch {
+    return targetUrl;
+  }
+};
 
-    const trackerBase = new URL('/api/track/click', env.NEXT_PUBLIC_APP_URL);
+const buildCampaignClickTrackingUrl = (
+  trackedTargetUrl: string | null | undefined,
+  campaignId: string,
+  shopDomain: string,
+  externalId?: string | null,
+) => {
+  if (!trackedTargetUrl) {
+    return '';
+  }
+
+  const trackingBase = env.SHOPIFY_APP_URL || env.NEXT_PUBLIC_APP_URL;
+
+  try {
+    const trackerBase = new URL('/api/track/click', trackingBase);
     trackerBase.searchParams.set('c', campaignId);
     trackerBase.searchParams.set('s', shopDomain);
-    trackerBase.searchParams.set('u', target.toString());
+    trackerBase.searchParams.set('u', trackedTargetUrl);
+    trackerBase.searchParams.set('nr', '1');
     if (externalId) {
       trackerBase.searchParams.set('e', externalId);
     }
     return trackerBase.toString();
   } catch {
-    return targetUrl;
+    return '';
   }
 };
 
 const buildAutomationTrackedUrl = (
   targetUrl: string | null | undefined,
   ruleKey: AutomationRuleKey,
-  shopDomain: string,
-  externalId?: string | null,
+  _shopDomain: string,
+  _externalId?: string | null,
 ) => {
   if (!targetUrl) {
     return null;
   }
 
   try {
-    const target = new URL(targetUrl);
+    const target = new URL(unwrapTrackingRedirectUrl(targetUrl));
     target.searchParams.set('utm_source', 'push_eagle');
     target.searchParams.set('utm_medium', 'web_push');
-    target.searchParams.set('utm_campaign', `automation_${ruleKey}`);
-    target.searchParams.set('utm_content', ruleKey);
+    target.searchParams.set('utm_campaign', ruleKey);
+    return target.toString();
+  } catch {
+    return targetUrl;
+  }
+};
 
-    const trackerBase = new URL('/api/track/automation-click', env.NEXT_PUBLIC_APP_URL);
+function unwrapTrackingRedirectUrl(candidate: string) {
+  try {
+    const parsed = new URL(candidate);
+    const pathname = parsed.pathname.toLowerCase();
+    const isTrackingPath = pathname === '/api/track/click' || pathname === '/api/track/automation-click';
+    const encodedTarget = parsed.searchParams.get('u');
+    if (!isTrackingPath || !encodedTarget) {
+      return candidate;
+    }
+
+    const decodedTarget = decodeURIComponent(encodedTarget);
+    const nested = new URL(decodedTarget);
+    if (/^https?:$/i.test(nested.protocol)) {
+      return nested.toString();
+    }
+
+    return candidate;
+  } catch {
+    return candidate;
+  }
+}
+
+const buildAutomationClickTrackingUrl = (
+  trackedTargetUrl: string | null | undefined,
+  ruleKey: AutomationRuleKey,
+  shopDomain: string,
+  externalId?: string | null,
+) => {
+  if (!trackedTargetUrl) {
+    return '';
+  }
+
+  const trackingBase = env.SHOPIFY_APP_URL || env.NEXT_PUBLIC_APP_URL;
+
+  try {
+    const trackerBase = new URL('/api/track/automation-click', trackingBase);
     trackerBase.searchParams.set('r', ruleKey);
     trackerBase.searchParams.set('s', shopDomain);
-    trackerBase.searchParams.set('u', target.toString());
+    trackerBase.searchParams.set('u', trackedTargetUrl);
+    trackerBase.searchParams.set('nr', '1');
     if (externalId) {
       trackerBase.searchParams.set('e', externalId);
     }
     return trackerBase.toString();
   } catch {
-    return targetUrl;
+    return '';
   }
+};
+
+const toAbsoluteStorefrontUrl = (candidate: string | null | undefined, fallbackShopDomain: string) => {
+  const raw = String(candidate ?? '').trim();
+  if (!raw) {
+    return `https://${fallbackShopDomain}`;
+  }
+
+  try {
+    return new URL(raw).toString();
+  } catch {
+    const normalizedHost = raw.replace(/^https?:\/\//i, '').replace(/\/$/, '');
+    if (!normalizedHost) {
+      return `https://${fallbackShopDomain}`;
+    }
+    return `https://${normalizedHost}`;
+  }
+};
+
+const toHttpUrlOrNull = (candidate: string | null | undefined, baseUrl?: string | null) => {
+  const raw = String(candidate ?? '').trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = baseUrl ? new URL(raw, baseUrl) : new URL(raw);
+    if (!/^https?:$/i.test(parsed.protocol)) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+};
+
+const collectMediaReferences = (value: unknown): Set<string> => {
+  const found = new Set<string>();
+  const r2Base = env.R2_PUBLIC_BASE_URL.trim().replace(/\/$/, '');
+
+  const walk = (node: unknown) => {
+    if (node == null) {
+      return;
+    }
+
+    if (typeof node === 'string') {
+      const candidate = node.trim();
+      if (!candidate) {
+        return;
+      }
+
+      const isMediaPath = candidate.includes('/api/media/') || candidate.includes('/merchant-media/');
+      const isR2Public = Boolean(r2Base && candidate.startsWith(r2Base));
+      if (isMediaPath || isR2Public) {
+        found.add(candidate);
+      }
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      node.forEach((item) => walk(item));
+      return;
+    }
+
+    if (typeof node === 'object') {
+      Object.values(node as Record<string, unknown>).forEach((item) => walk(item));
+    }
+  };
+
+  walk(value);
+  return found;
+};
+
+const extractAssetIdFromMediaUrl = (value: string) => {
+  const match = value.match(/\/api\/media\/([a-z0-9-]+)/i);
+  return match?.[1] ?? null;
+};
+
+const extractObjectKeyFromMediaUrl = (value: string) => {
+  try {
+    const url = new URL(value);
+    return decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+  } catch {
+    if (value.startsWith('/')) {
+      return decodeURIComponent(value.replace(/^\/+/, ''));
+    }
+    return null;
+  }
+};
+
+const cleanupUnusedMediaAssets = async (shopDomain: string, removedUrls: string[]) => {
+  const uniqueUrls = [...new Set(removedUrls.map((url) => String(url ?? '').trim()).filter(Boolean))];
+  if (uniqueUrls.length === 0) {
+    return;
+  }
+
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  type MediaAssetRef = {
+    id: string;
+    public_url: string | null;
+    object_key: string | null;
+    shop_domain: string;
+  };
+
+  for (const mediaUrl of uniqueUrls) {
+    let mediaAssetRow: MediaAssetRef | null = null;
+
+    const assetId = extractAssetIdFromMediaUrl(mediaUrl);
+    if (assetId) {
+      const rows = await sql`
+        SELECT id, public_url, object_key, shop_domain
+        FROM media_assets
+        WHERE id = ${assetId}
+          AND shop_domain = ${shopDomain}
+        LIMIT 1
+      `;
+      mediaAssetRow = (rows[0] as MediaAssetRef | undefined) ?? null;
+    }
+
+    if (!mediaAssetRow) {
+      const rows = await sql`
+        SELECT id, public_url, object_key, shop_domain
+        FROM media_assets
+        WHERE public_url = ${mediaUrl}
+          AND shop_domain = ${shopDomain}
+        LIMIT 1
+      `;
+      mediaAssetRow = (rows[0] as MediaAssetRef | undefined) ?? null;
+    }
+
+    if (!mediaAssetRow) {
+      const objectKey = extractObjectKeyFromMediaUrl(mediaUrl);
+      if (objectKey) {
+        const rows = await sql`
+          SELECT id, public_url, object_key, shop_domain
+          FROM media_assets
+          WHERE object_key = ${objectKey}
+            AND shop_domain = ${shopDomain}
+          LIMIT 1
+        `;
+        mediaAssetRow = (rows[0] as MediaAssetRef | undefined) ?? null;
+      }
+    }
+
+    if (!mediaAssetRow || !mediaAssetRow.object_key) {
+      continue;
+    }
+
+    const rows = await sql`
+      SELECT
+        EXISTS (
+          SELECT 1
+          FROM campaigns
+          WHERE shop_domain = ${shopDomain}
+            AND (
+              icon_url = ${mediaAssetRow.public_url}
+              OR image_url = ${mediaAssetRow.public_url}
+              OR windows_image_url = ${mediaAssetRow.public_url}
+              OR macos_image_url = ${mediaAssetRow.public_url}
+              OR android_image_url = ${mediaAssetRow.public_url}
+              OR icon_url LIKE ${`%/api/media/${mediaAssetRow.id}%`}
+              OR image_url LIKE ${`%/api/media/${mediaAssetRow.id}%`}
+              OR windows_image_url LIKE ${`%/api/media/${mediaAssetRow.id}%`}
+              OR macos_image_url LIKE ${`%/api/media/${mediaAssetRow.id}%`}
+              OR android_image_url LIKE ${`%/api/media/${mediaAssetRow.id}%`}
+            )
+        ) AS in_campaigns,
+        EXISTS (
+          SELECT 1
+          FROM merchant_settings
+          WHERE shop_domain = ${shopDomain}
+            AND (
+              opt_in_logo_url = ${mediaAssetRow.public_url}
+              OR brand_logo_url = ${mediaAssetRow.public_url}
+              OR opt_in_logo_url LIKE ${`%/api/media/${mediaAssetRow.id}%`}
+              OR brand_logo_url LIKE ${`%/api/media/${mediaAssetRow.id}%`}
+            )
+        ) AS in_settings,
+        EXISTS (
+          SELECT 1
+          FROM automation_rules
+          WHERE shop_domain = ${shopDomain}
+            AND (
+              config::text LIKE ${`%${mediaAssetRow.id}%`}
+              OR config::text LIKE ${`%${mediaAssetRow.object_key}%`}
+              OR (${mediaAssetRow.public_url} IS NOT NULL AND config::text LIKE ${`%${mediaAssetRow.public_url}%`})
+            )
+        ) AS in_automation_rules
+    `;
+
+    const referenceRow = rows[0] as {
+      in_campaigns?: boolean;
+      in_settings?: boolean;
+      in_automation_rules?: boolean;
+    } | undefined;
+
+    const stillReferenced = Boolean(
+      referenceRow?.in_campaigns || referenceRow?.in_settings || referenceRow?.in_automation_rules,
+    );
+
+    if (stillReferenced) {
+      continue;
+    }
+
+    try {
+      await deleteImageFromR2(mediaAssetRow.object_key);
+    } catch {
+      // Ignore remote delete errors and still prune stale metadata row.
+    }
+
+    await sql`
+      DELETE FROM media_assets
+      WHERE id = ${mediaAssetRow.id}
+        AND shop_domain = ${shopDomain}
+    `;
+  }
+};
+
+export const pruneOrphanedMediaAssets = async (shopDomain: string, olderThanMinutes = 60) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  const safeOlderThanMinutes = Math.max(5, Math.min(Math.floor(olderThanMinutes), 60 * 24 * 30));
+
+  const candidates = await sql`
+    SELECT m.id, m.public_url, m.object_key
+    FROM media_assets m
+    WHERE m.shop_domain = ${shopDomain}
+      AND m.object_key IS NOT NULL
+      AND m.created_at < NOW() - (${safeOlderThanMinutes} * INTERVAL '1 minute')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM campaigns c
+        WHERE c.shop_domain = m.shop_domain
+          AND (
+            c.icon_url = m.public_url
+            OR c.image_url = m.public_url
+            OR c.windows_image_url = m.public_url
+            OR c.macos_image_url = m.public_url
+            OR c.android_image_url = m.public_url
+            OR c.icon_url LIKE ('%/api/media/' || m.id || '%')
+            OR c.image_url LIKE ('%/api/media/' || m.id || '%')
+            OR c.windows_image_url LIKE ('%/api/media/' || m.id || '%')
+            OR c.macos_image_url LIKE ('%/api/media/' || m.id || '%')
+            OR c.android_image_url LIKE ('%/api/media/' || m.id || '%')
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM merchant_settings s
+        WHERE s.shop_domain = m.shop_domain
+          AND (
+            s.opt_in_logo_url = m.public_url
+            OR s.brand_logo_url = m.public_url
+            OR s.opt_in_logo_url LIKE ('%/api/media/' || m.id || '%')
+            OR s.brand_logo_url LIKE ('%/api/media/' || m.id || '%')
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM automation_rules a
+        WHERE a.shop_domain = m.shop_domain
+          AND (
+            a.config::text LIKE ('%' || m.id || '%')
+            OR a.config::text LIKE ('%' || m.object_key || '%')
+            OR (m.public_url IS NOT NULL AND a.config::text LIKE ('%' || m.public_url || '%'))
+          )
+      )
+    ORDER BY m.created_at ASC
+    LIMIT 50
+  `;
+
+  let deletedCount = 0;
+  for (const row of candidates as Array<{ id: string; public_url: string | null; object_key: string | null }>) {
+    if (!row.object_key) {
+      continue;
+    }
+
+    try {
+      await deleteImageFromR2(String(row.object_key));
+    } catch {
+      // Ignore remote delete errors and still attempt to prune metadata.
+    }
+
+    await sql`
+      DELETE FROM media_assets
+      WHERE id = ${String(row.id)}
+        AND shop_domain = ${shopDomain}
+    `;
+    deletedCount += 1;
+  }
+
+  return { deletedCount };
+};
+
+const resolveAutomationDestination = async (shopDomain: string, payload: AutomationJobPayload) => {
+  const sql = getNeonSql();
+  const rows = await sql`
+    SELECT m.primary_domain, m.myshopify_domain, s.brand_logo_url, s.opt_in_logo_url
+    FROM merchants m
+    LEFT JOIN merchant_settings s ON s.shop_domain = m.shop_domain
+    WHERE m.shop_domain = ${shopDomain}
+    LIMIT 1
+  `;
+
+  const storeBase = toAbsoluteStorefrontUrl(
+    rows[0]?.primary_domain ?? rows[0]?.myshopify_domain ?? shopDomain,
+    shopDomain,
+  );
+
+  const targetUrl = toHttpUrlOrNull(unwrapTrackingRedirectUrl(payload.targetUrl ?? ''), storeBase) ?? storeBase;
+
+  const fallbackLogo = rows[0]?.brand_logo_url ?? rows[0]?.opt_in_logo_url ?? null;
+  const iconUrl = toHttpUrlOrNull(payload.iconUrl ?? null, storeBase)
+    ?? toHttpUrlOrNull(fallbackLogo ? String(fallbackLogo) : null, storeBase);
+  const imageUrl = toHttpUrlOrNull(payload.imageUrl ?? null, storeBase);
+  const windowsImageUrl = toHttpUrlOrNull(payload.windowsImageUrl ?? null, storeBase);
+  const macosImageUrl = toHttpUrlOrNull(payload.macosImageUrl ?? null, storeBase);
+  const androidImageUrl = toHttpUrlOrNull(payload.androidImageUrl ?? null, storeBase);
+
+  const rawActionButtons = Array.isArray((payload.metadata ?? {}).actionButtons)
+    ? ((payload.metadata ?? {}).actionButtons as Array<Record<string, unknown>>)
+    : [];
+  const actionButtons = rawActionButtons
+    .map((button) => {
+      const title = String(button.title ?? '').trim();
+      const link = toHttpUrlOrNull(unwrapTrackingRedirectUrl(String(button.link ?? '')), storeBase);
+      if (!title || !link) {
+        return null;
+      }
+      return { title, link };
+    })
+    .filter((button): button is { title: string; link: string } => Boolean(button));
+
+  return {
+    targetUrl,
+    iconUrl,
+    imageUrl,
+    windowsImageUrl,
+    macosImageUrl,
+    androidImageUrl,
+    actionButtons,
+  };
+};
+
+const selectAutomationImageForDevice = (
+  payload: AutomationJobPayload,
+  platform: string | null | undefined,
+  browser: string | null | undefined,
+) => {
+  const device = `${String(platform ?? '').toLowerCase()} ${String(browser ?? '').toLowerCase()}`.trim();
+
+  if (device.includes('android')) {
+    return payload.androidImageUrl ?? payload.imageUrl ?? null;
+  }
+
+  if (device.includes('windows')) {
+    return payload.windowsImageUrl ?? payload.imageUrl ?? null;
+  }
+
+  if (device.includes('mac') || device.includes('osx') || device.includes('ios') || device.includes('safari')) {
+    return payload.macosImageUrl ?? payload.imageUrl ?? null;
+  }
+
+  return payload.imageUrl ?? null;
 };
 
 const ensureMerchant = async (shopDomain: string) => {
@@ -890,14 +1478,374 @@ export const ensureMerchantAccount = async (shopDomain: string) => {
   await ensureMerchant(shopDomain);
 };
 
+const DEFAULT_WELCOME_STEPS: Record<WelcomeStepKey, WelcomeStepConfig> = {
+  'reminder-1': {
+    enabled: true,
+    delayMinutes: 0,
+    title: 'You are subscribed',
+    body: 'We will keep you posted with latest updates.',
+    targetUrl: null,
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [],
+  },
+  'reminder-2': {
+    enabled: true,
+    delayMinutes: 3,
+    title: "We're glad to have you here!",
+    body: "As a subscriber, you'll get our latest offers and products before anyone else.",
+    targetUrl: null,
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'Shop now', link: '/collections/all' }],
+  },
+  'reminder-3': {
+    enabled: true,
+    delayMinutes: 1440,
+    title: 'Anything specific caught your eye?',
+    body: 'Our products are made with care, giving you the best value.',
+    targetUrl: null,
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [
+      { title: 'View products', link: '/collections/all' },
+      { title: 'Special offers', link: '/collections/sale' },
+    ],
+  },
+};
+
+const DEFAULT_CART_STEPS: Record<CartStepKey, WelcomeStepConfig> = {
+  'cart-reminder-1': {
+    enabled: true,
+    delayMinutes: 20,
+    title: 'You left something behind!',
+    body: "We've saved your cart for you. Buy them now before they go out of stock!",
+    targetUrl: '/cart',
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [
+      { title: 'Checkout', link: '/cart' },
+      { title: 'Continue Shopping', link: '/collections/all' },
+    ],
+  },
+  'cart-reminder-2': {
+    enabled: true,
+    delayMinutes: 120,
+    title: 'Still thinking it over?',
+    body: 'Your cart is waiting for you. Complete your purchase now and get free shipping on all orders!',
+    targetUrl: '/cart',
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'View Cart', link: '/cart' }],
+  },
+  'cart-reminder-3': {
+    enabled: false,
+    delayMinutes: 1440,
+    title: "Don't miss out!",
+    body: "The items in your cart are popular and might sell out soon. Grab them before they're gone!",
+    targetUrl: '/cart',
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'Complete Purchase', link: '/cart' }],
+  },
+};
+
+const DEFAULT_BROWSE_STEPS: Record<BrowseStepKey, WelcomeStepConfig> = {
+  'browse-reminder-1': {
+    enabled: true,
+    delayMinutes: 20,
+    title: 'Still interested in this?',
+    body: 'We noticed you viewed this product. Take another look before it sells out.',
+    targetUrl: null,
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'View Product', link: '/products' }],
+  },
+  'browse-reminder-2': {
+    enabled: false,
+    delayMinutes: 120,
+    title: 'A special offer for you',
+    body: "Here is 10% off the products you viewed. Don't miss out!",
+    targetUrl: null,
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'Shop Now', link: '/collections/all' }],
+  },
+  'browse-reminder-3': {
+    enabled: false,
+    delayMinutes: 1440,
+    title: "Don't let it get away!",
+    body: 'The product you viewed is getting a lot of attention. Secure yours before it is gone.',
+    targetUrl: null,
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'View Product', link: '/products' }],
+  },
+};
+
+const DEFAULT_SHIPPING_STEPS: Record<ShippingStepKey, WelcomeStepConfig> = {
+  'shipping-1': {
+    enabled: true,
+    delayMinutes: 0,
+    title: 'Your order is on the way',
+    body: 'There is a new fulfillment update for your order.',
+    targetUrl: '/',
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'Track Package', link: '/' }],
+  },
+};
+
+const DEFAULT_BACK_IN_STOCK_STEPS: Record<BackInStockStepKey, WelcomeStepConfig> = {
+  'stock-1': {
+    enabled: true,
+    delayMinutes: 0,
+    title: 'Back in Stock Alert',
+    body: '{{product_name}} is now back in stock. Buy now before it runs out again.',
+    targetUrl: '/',
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'Shop Now', link: '/' }],
+  },
+};
+
+const DEFAULT_PRICE_DROP_STEPS: Record<PriceDropStepKey, WelcomeStepConfig> = {
+  'price-1': {
+    enabled: true,
+    delayMinutes: 0,
+    title: 'Price Drop Alert',
+    body: '{{product_name}} price dropped from {{subscribed_price}} to {{current_price}}',
+    targetUrl: '/',
+    iconUrl: null,
+    imageUrl: null,
+    windowsImageUrl: null,
+    macosImageUrl: null,
+    androidImageUrl: null,
+    actionButtons: [{ title: 'View Item', link: '/' }],
+  },
+};
+
+const deepCloneStepDefaults = <T extends string>(defaults: Record<T, WelcomeStepConfig>): Record<T, WelcomeStepConfig> => {
+  return JSON.parse(JSON.stringify(defaults)) as Record<T, WelcomeStepConfig>;
+};
+
+const deepCloneWelcomeDefaults = (): Record<WelcomeStepKey, WelcomeStepConfig> => {
+  return deepCloneStepDefaults(DEFAULT_WELCOME_STEPS);
+};
+
+const deepCloneCartDefaults = (): Record<CartStepKey, WelcomeStepConfig> => {
+  return deepCloneStepDefaults(DEFAULT_CART_STEPS);
+};
+
+const deepCloneBrowseDefaults = (): Record<BrowseStepKey, WelcomeStepConfig> => {
+  return deepCloneStepDefaults(DEFAULT_BROWSE_STEPS);
+};
+
+const deepCloneShippingDefaults = (): Record<ShippingStepKey, WelcomeStepConfig> => {
+  return deepCloneStepDefaults(DEFAULT_SHIPPING_STEPS);
+};
+
+const deepCloneBackInStockDefaults = (): Record<BackInStockStepKey, WelcomeStepConfig> => {
+  return deepCloneStepDefaults(DEFAULT_BACK_IN_STOCK_STEPS);
+};
+
+const deepClonePriceDropDefaults = (): Record<PriceDropStepKey, WelcomeStepConfig> => {
+  return deepCloneStepDefaults(DEFAULT_PRICE_DROP_STEPS);
+};
+
+const toSafeDelayMinutes = (value: unknown, fallback: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(0, Math.min(60 * 24 * 30, Math.floor(parsed)));
+};
+
+const normalizeActionButtons = (value: unknown) => {
+  if (!Array.isArray(value)) {
+    return [] as Array<{ title: string; link: string }>;
+  }
+
+  return value
+    .map((item) => {
+      const title = String((item as { title?: unknown })?.title ?? '').trim();
+      const link = String((item as { link?: unknown })?.link ?? '').trim();
+      if (!title || !link) {
+        return null;
+      }
+      return { title, link };
+    })
+    .filter(Boolean) as Array<{ title: string; link: string }>;
+};
+
+const parseSteppedRuleConfig = <T extends string>(
+  config: unknown,
+  defaultsFactory: () => Record<T, WelcomeStepConfig>,
+): { steps: Record<T, WelcomeStepConfig> } => {
+  const defaults = defaultsFactory();
+  const raw = (config ?? {}) as Record<string, unknown>;
+  const rawSteps = (raw.steps ?? {}) as Record<string, unknown>;
+
+  for (const stepKey of Object.keys(defaults) as T[]) {
+    const rawStep = (rawSteps[stepKey] ?? {}) as Record<string, unknown>;
+    const current = defaults[stepKey];
+    defaults[stepKey] = {
+      enabled: typeof rawStep.enabled === 'boolean' ? rawStep.enabled : current.enabled,
+      delayMinutes: toSafeDelayMinutes(rawStep.delayMinutes, current.delayMinutes),
+      title: String(rawStep.title ?? current.title),
+      body: String(rawStep.body ?? current.body),
+      targetUrl: rawStep.targetUrl == null ? current.targetUrl ?? null : String(rawStep.targetUrl),
+      iconUrl: rawStep.iconUrl == null ? current.iconUrl ?? null : String(rawStep.iconUrl),
+      imageUrl: rawStep.imageUrl == null ? current.imageUrl ?? null : String(rawStep.imageUrl),
+      windowsImageUrl: rawStep.windowsImageUrl == null ? current.windowsImageUrl ?? null : String(rawStep.windowsImageUrl),
+      macosImageUrl: rawStep.macosImageUrl == null ? current.macosImageUrl ?? null : String(rawStep.macosImageUrl),
+      androidImageUrl: rawStep.androidImageUrl == null ? current.androidImageUrl ?? null : String(rawStep.androidImageUrl),
+      actionButtons: normalizeActionButtons(rawStep.actionButtons ?? current.actionButtons ?? []),
+    };
+  }
+
+  return { steps: defaults };
+};
+
+const parseWelcomeRuleConfig = (config: unknown): WelcomeRuleConfig => {
+  return parseSteppedRuleConfig(config, deepCloneWelcomeDefaults);
+};
+
+const parseCartRuleConfig = (config: unknown): CartRuleConfig => {
+  return parseSteppedRuleConfig(config, deepCloneCartDefaults);
+};
+
+const parseBrowseRuleConfig = (config: unknown): BrowseRuleConfig => {
+  return parseSteppedRuleConfig(config, deepCloneBrowseDefaults);
+};
+
+const parseShippingRuleConfig = (config: unknown): ShippingRuleConfig => {
+  const raw = (config ?? {}) as Record<string, unknown>;
+  const sendWhen = Array.isArray(raw.sendWhen)
+    ? raw.sendWhen.map((value) => String(value).trim().toLowerCase()).filter(Boolean)
+    : ['in_transit', 'out_for_delivery', 'delivered'];
+
+  return {
+    sendWhen,
+    ...parseSteppedRuleConfig(config, deepCloneShippingDefaults),
+  };
+};
+
+const parseBackInStockRuleConfig = (config: unknown): BackInStockRuleConfig => {
+  return parseSteppedRuleConfig(config, deepCloneBackInStockDefaults);
+};
+
+const parsePriceDropRuleConfig = (config: unknown): PriceDropRuleConfig => {
+  return parseSteppedRuleConfig(config, deepClonePriceDropDefaults);
+};
+
+const mergeSteppedRuleConfig = <T extends string>(
+  existingConfig: unknown,
+  patchConfig: unknown,
+  defaultsFactory: () => Record<T, WelcomeStepConfig>,
+) => {
+  const existing = parseSteppedRuleConfig(existingConfig, defaultsFactory);
+  const rawPatch = (patchConfig ?? {}) as Record<string, unknown>;
+  const patchSteps = (rawPatch.steps ?? {}) as Record<string, unknown>;
+  const mergedSteps = defaultsFactory();
+
+  for (const stepKey of Object.keys(mergedSteps) as T[]) {
+    const current = existing.steps[stepKey];
+    const patchStep = (patchSteps[stepKey] ?? {}) as Record<string, unknown>;
+    mergedSteps[stepKey] = {
+      enabled: typeof patchStep.enabled === 'boolean' ? patchStep.enabled : current.enabled,
+      delayMinutes: patchStep.delayMinutes == null ? current.delayMinutes : toSafeDelayMinutes(patchStep.delayMinutes, current.delayMinutes),
+      title: patchStep.title == null ? current.title : String(patchStep.title),
+      body: patchStep.body == null ? current.body : String(patchStep.body),
+      targetUrl: patchStep.targetUrl == null ? current.targetUrl ?? null : String(patchStep.targetUrl),
+      iconUrl: patchStep.iconUrl == null ? current.iconUrl ?? null : String(patchStep.iconUrl),
+      imageUrl: patchStep.imageUrl == null ? current.imageUrl ?? null : String(patchStep.imageUrl),
+      windowsImageUrl: patchStep.windowsImageUrl == null ? current.windowsImageUrl ?? null : String(patchStep.windowsImageUrl),
+      macosImageUrl: patchStep.macosImageUrl == null ? current.macosImageUrl ?? null : String(patchStep.macosImageUrl),
+      androidImageUrl: patchStep.androidImageUrl == null ? current.androidImageUrl ?? null : String(patchStep.androidImageUrl),
+      actionButtons: patchStep.actionButtons == null ? normalizeActionButtons(current.actionButtons ?? []) : normalizeActionButtons(patchStep.actionButtons),
+    };
+  }
+
+  return { steps: mergedSteps };
+};
+
+const mergeRuleConfig = (ruleKey: AutomationRuleKey, existingConfig: unknown, patchConfig: unknown) => {
+  if (ruleKey === 'welcome_subscriber') {
+    return mergeSteppedRuleConfig(existingConfig, patchConfig, deepCloneWelcomeDefaults);
+  }
+
+  if (ruleKey === 'cart_abandonment_30m') {
+    return mergeSteppedRuleConfig(existingConfig, patchConfig, deepCloneCartDefaults);
+  }
+
+  if (ruleKey === 'browse_abandonment_15m') {
+    return mergeSteppedRuleConfig(existingConfig, patchConfig, deepCloneBrowseDefaults);
+  }
+
+  if (ruleKey === 'shipping_notifications') {
+    const rawExisting = (existingConfig ?? {}) as Record<string, unknown>;
+    const rawPatch = (patchConfig ?? {}) as Record<string, unknown>;
+    return {
+      sendWhen: Array.isArray(rawPatch.sendWhen)
+        ? rawPatch.sendWhen.map((value) => String(value).trim().toLowerCase()).filter(Boolean)
+        : parseShippingRuleConfig(rawExisting).sendWhen,
+      ...mergeSteppedRuleConfig(existingConfig, patchConfig, deepCloneShippingDefaults),
+    };
+  }
+
+  if (ruleKey === 'back_in_stock') {
+    return mergeSteppedRuleConfig(existingConfig, patchConfig, deepCloneBackInStockDefaults);
+  }
+
+  if (ruleKey === 'price_drop') {
+    return mergeSteppedRuleConfig(existingConfig, patchConfig, deepClonePriceDropDefaults);
+  }
+
+  return { ...(existingConfig as Record<string, unknown>), ...(patchConfig as Record<string, unknown>) };
+};
+
 const DEFAULT_AUTOMATION_RULES: Array<{ key: AutomationRuleKey; enabled: boolean; config: Record<string, unknown> }> = [
-  { key: 'welcome_subscriber', enabled: true, config: { delayMinutes: 0 } },
-  { key: 'browse_abandonment_15m', enabled: true, config: { delayMinutes: 15 } },
-  { key: 'cart_abandonment_30m', enabled: true, config: { delayMinutes: 30 } },
+  { key: 'welcome_subscriber', enabled: true, config: parseWelcomeRuleConfig(null) as unknown as Record<string, unknown> },
+  { key: 'browse_abandonment_15m', enabled: true, config: parseBrowseRuleConfig(null) as unknown as Record<string, unknown> },
+  { key: 'cart_abandonment_30m', enabled: true, config: parseCartRuleConfig(null) as unknown as Record<string, unknown> },
   { key: 'checkout_abandonment_30m', enabled: false, config: { delayMinutes: 30 } },
-  { key: 'shipping_notifications', enabled: true, config: { sendWhen: ['in_transit', 'out_for_delivery', 'delivered'] } },
-  { key: 'back_in_stock', enabled: true, config: {} },
-  { key: 'price_drop', enabled: true, config: {} },
+  { key: 'shipping_notifications', enabled: true, config: parseShippingRuleConfig(null) as unknown as Record<string, unknown> },
+  { key: 'back_in_stock', enabled: true, config: parseBackInStockRuleConfig(null) as unknown as Record<string, unknown> },
+  { key: 'price_drop', enabled: true, config: parsePriceDropRuleConfig(null) as unknown as Record<string, unknown> },
   { key: 'win_back_7d', enabled: false, config: { delayDays: 7 } },
   { key: 'post_purchase_followup', enabled: false, config: { delayDays: 2 } },
 ];
@@ -912,6 +1860,132 @@ const ensureAutomationRules = async (shopDomain: string) => {
       INSERT INTO automation_rules (id, shop_domain, rule_key, enabled, config)
       VALUES (${randomUUID()}, ${shopDomain}, ${rule.key}, ${rule.enabled}, ${JSON.stringify(rule.config)}::jsonb)
       ON CONFLICT (shop_domain, rule_key) DO NOTHING
+    `;
+  }
+
+  const welcomeRows = await sql`
+    SELECT config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+    LIMIT 1
+  `;
+
+  const welcomeConfig = (welcomeRows[0]?.config ?? {}) as Record<string, unknown>;
+  const hasSteps = Boolean((welcomeConfig.steps as Record<string, unknown> | undefined));
+  if (!hasSteps) {
+    const normalized = parseWelcomeRuleConfig(welcomeConfig);
+    await sql`
+      UPDATE automation_rules
+      SET config = ${JSON.stringify(normalized)}::jsonb,
+          updated_at = NOW()
+      WHERE shop_domain = ${shopDomain}
+        AND rule_key = 'welcome_subscriber'
+    `;
+  }
+
+  const cartRows = await sql`
+    SELECT config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'cart_abandonment_30m'
+    LIMIT 1
+  `;
+
+  const cartConfig = (cartRows[0]?.config ?? {}) as Record<string, unknown>;
+  const hasCartSteps = Boolean((cartConfig.steps as Record<string, unknown> | undefined));
+  if (!hasCartSteps) {
+    const normalized = parseCartRuleConfig(cartConfig);
+    await sql`
+      UPDATE automation_rules
+      SET config = ${JSON.stringify(normalized)}::jsonb,
+          updated_at = NOW()
+      WHERE shop_domain = ${shopDomain}
+        AND rule_key = 'cart_abandonment_30m'
+    `;
+  }
+
+  const browseRows = await sql`
+    SELECT config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'browse_abandonment_15m'
+    LIMIT 1
+  `;
+
+  const browseConfig = (browseRows[0]?.config ?? {}) as Record<string, unknown>;
+  const hasBrowseSteps = Boolean((browseConfig.steps as Record<string, unknown> | undefined));
+  if (!hasBrowseSteps) {
+    const normalized = parseBrowseRuleConfig(browseConfig);
+    await sql`
+      UPDATE automation_rules
+      SET config = ${JSON.stringify(normalized)}::jsonb,
+          updated_at = NOW()
+      WHERE shop_domain = ${shopDomain}
+        AND rule_key = 'browse_abandonment_15m'
+    `;
+  }
+
+  const shippingRows = await sql`
+    SELECT config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'shipping_notifications'
+    LIMIT 1
+  `;
+
+  const shippingConfig = (shippingRows[0]?.config ?? {}) as Record<string, unknown>;
+  const hasShippingSteps = Boolean((shippingConfig.steps as Record<string, unknown> | undefined));
+  if (!hasShippingSteps) {
+    const normalized = parseShippingRuleConfig(shippingConfig);
+    await sql`
+      UPDATE automation_rules
+      SET config = ${JSON.stringify(normalized)}::jsonb,
+          updated_at = NOW()
+      WHERE shop_domain = ${shopDomain}
+        AND rule_key = 'shipping_notifications'
+    `;
+  }
+
+  const backInStockRows = await sql`
+    SELECT config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'back_in_stock'
+    LIMIT 1
+  `;
+
+  const backInStockConfig = (backInStockRows[0]?.config ?? {}) as Record<string, unknown>;
+  const hasBackInStockSteps = Boolean((backInStockConfig.steps as Record<string, unknown> | undefined));
+  if (!hasBackInStockSteps) {
+    const normalized = parseBackInStockRuleConfig(backInStockConfig);
+    await sql`
+      UPDATE automation_rules
+      SET config = ${JSON.stringify(normalized)}::jsonb,
+          updated_at = NOW()
+      WHERE shop_domain = ${shopDomain}
+        AND rule_key = 'back_in_stock'
+    `;
+  }
+
+  const priceDropRows = await sql`
+    SELECT config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'price_drop'
+    LIMIT 1
+  `;
+
+  const priceDropConfig = (priceDropRows[0]?.config ?? {}) as Record<string, unknown>;
+  const hasPriceDropSteps = Boolean((priceDropConfig.steps as Record<string, unknown> | undefined));
+  if (!hasPriceDropSteps) {
+    const normalized = parsePriceDropRuleConfig(priceDropConfig);
+    await sql`
+      UPDATE automation_rules
+      SET config = ${JSON.stringify(normalized)}::jsonb,
+          updated_at = NOW()
+      WHERE shop_domain = ${shopDomain}
+        AND rule_key = 'price_drop'
     `;
   }
 };
@@ -939,21 +2013,45 @@ export const listAutomationRules = async (shopDomain: string) => {
 export const upsertAutomationRule = async (
   shopDomain: string,
   ruleKey: AutomationRuleKey,
-  enabled: boolean,
+  enabled?: boolean,
   config?: Record<string, unknown>,
 ) => {
   await ensureAutomationRules(shopDomain);
   const sql = getNeonSql();
 
+  const currentRows = await sql`
+    SELECT enabled, config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = ${ruleKey}
+    LIMIT 1
+  `;
+
+  if (!currentRows[0]) {
+    return null;
+  }
+
+  const currentEnabled = Boolean(currentRows[0]?.enabled);
+  const currentConfig = (currentRows[0]?.config ?? {}) as Record<string, unknown>;
+  const currentMediaRefs = collectMediaReferences(currentConfig);
+  const nextEnabled = typeof enabled === 'boolean' ? enabled : currentEnabled;
+  const nextConfig = config === undefined ? currentConfig : mergeRuleConfig(ruleKey, currentConfig, config);
+  const nextMediaRefs = collectMediaReferences(nextConfig);
+
   const rows = await sql`
     UPDATE automation_rules
-    SET enabled = ${enabled}, config = ${JSON.stringify(config ?? {})}::jsonb, updated_at = NOW()
+    SET enabled = ${nextEnabled}, config = ${JSON.stringify(nextConfig)}::jsonb, updated_at = NOW()
     WHERE shop_domain = ${shopDomain}
       AND rule_key = ${ruleKey}
     RETURNING id, rule_key, enabled, config, updated_at
   `;
 
   const row = rows[0];
+  const removedMediaRefs = [...currentMediaRefs].filter((url) => !nextMediaRefs.has(url));
+  if (removedMediaRefs.length > 0) {
+    await cleanupUnusedMediaAssets(shopDomain, removedMediaRefs);
+  }
+
   return row
     ? {
         id: String(row.id),
@@ -1056,22 +2154,47 @@ const listAutomationTargets = async (input: { shopDomain: string; externalId?: s
     return [] as Array<{ tokenId: number; subscriberId: number | null; externalId: string | null }>;
   }
 
+  // Keep only the most recently seen active token per subscriber to prevent duplicate sends.
   const rows = input.subscriberId
     ? await sql`
-      SELECT t.id AS token_id, s.id AS subscriber_id, s.external_id
-      FROM subscriber_tokens t
-      JOIN subscribers s ON s.id = t.subscriber_id
-      WHERE t.shop_domain = ${input.shopDomain}
-        AND s.id = ${input.subscriberId}
-        AND t.status = 'active'
+      WITH ranked AS (
+        SELECT
+          t.id AS token_id,
+          s.id AS subscriber_id,
+          s.external_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY s.id
+            ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC, t.id DESC
+          ) AS rn
+        FROM subscriber_tokens t
+        JOIN subscribers s ON s.id = t.subscriber_id
+        WHERE t.shop_domain = ${input.shopDomain}
+          AND s.id = ${input.subscriberId}
+          AND t.status = 'active'
+      )
+      SELECT token_id, subscriber_id, external_id
+      FROM ranked
+      WHERE rn = 1
     `
     : await sql`
-      SELECT t.id AS token_id, s.id AS subscriber_id, s.external_id
-      FROM subscriber_tokens t
-      JOIN subscribers s ON s.id = t.subscriber_id
-      WHERE t.shop_domain = ${input.shopDomain}
-        AND s.external_id = ${input.externalId ?? ''}
-        AND t.status = 'active'
+      WITH ranked AS (
+        SELECT
+          t.id AS token_id,
+          s.id AS subscriber_id,
+          s.external_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY s.id
+            ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC, t.id DESC
+          ) AS rn
+        FROM subscriber_tokens t
+        JOIN subscribers s ON s.id = t.subscriber_id
+        WHERE t.shop_domain = ${input.shopDomain}
+          AND s.external_id = ${input.externalId ?? ''}
+          AND t.status = 'active'
+      )
+      SELECT token_id, subscriber_id, external_id
+      FROM ranked
+      WHERE rn = 1
     `;
 
   return rows.map((row) => ({
@@ -1295,6 +2418,15 @@ export const enqueueAutomationJob = async (input: {
   const jobId = randomUUID();
   const dueAt = input.dueAt ?? new Date();
 
+  if (input.dedupeKey) {
+    await sql`
+      DELETE FROM automation_jobs
+      WHERE shop_domain = ${input.shopDomain}
+        AND dedupe_key = ${input.dedupeKey}
+        AND status IN ('failed', 'skipped')
+    `;
+  }
+
   const rows = await sql`
     INSERT INTO automation_jobs (id, shop_domain, rule_key, token_id, subscriber_id, dedupe_key, payload, due_at)
     VALUES (
@@ -1314,11 +2446,264 @@ export const enqueueAutomationJob = async (input: {
   return rows[0] ? String(rows[0].id) : null;
 };
 
+/**
+ * Immediately process the pending welcome_subscriber job for the given tokenId.
+ * Called right after upsertSubscriberToken so the welcome notification fires
+ * instantly without waiting for the next cron cycle.
+ */
+export const dispatchWelcomeJobNow = async (shopDomain: string, tokenId: number) => {
+  const sql = getNeonSql();
+
+  const jobRows = await sql`
+    SELECT id
+    FROM automation_jobs
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+      AND token_id = ${tokenId}
+      AND status = 'pending'
+      AND due_at <= NOW() + INTERVAL '5 seconds'
+    ORDER BY due_at ASC, created_at ASC
+    LIMIT 20
+  `;
+
+  if (!jobRows.length) {
+    return { dispatched: false };
+  }
+
+  const results = await Promise.all(
+    jobRows.map((row) => processAutomationJob(String(row.id))),
+  );
+
+  return {
+    dispatched: true,
+    processedCount: results.filter((item) => item.processed).length,
+    failedCount: results.filter((item) => !item.processed && item.error).length,
+  };
+};
+
+export const enqueueIngestionJob = async (input: {
+  shopDomain: string;
+  jobType: IngestionJobType;
+  payload: PixelIngestionPayload | OrderCreateIngestionPayload;
+  dedupeKey?: string | null;
+  dueAt?: Date;
+}) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  const jobId = randomUUID();
+  const dueAt = input.dueAt ?? new Date();
+
+  const rows = await sql`
+    INSERT INTO ingestion_jobs (id, shop_domain, job_type, dedupe_key, payload, due_at)
+    VALUES (
+      ${jobId},
+      ${input.shopDomain},
+      ${input.jobType},
+      ${input.dedupeKey ?? null},
+      ${JSON.stringify(input.payload)}::jsonb,
+      ${dueAt}
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING id
+  `;
+
+  return rows[0] ? String(rows[0].id) : null;
+};
+
+export const listDueIngestionJobs = async (limit = 500, shardCount = 1, shardIndex = 0) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  const safeShardCount = Math.max(1, Math.min(Number(shardCount) || 1, 128));
+  const safeShardIndex = Math.max(0, Math.min(Number(shardIndex) || 0, safeShardCount - 1));
+
+  const rows = await sql`
+    SELECT id, shop_domain, job_type, payload
+    FROM ingestion_jobs
+    WHERE status = 'pending'
+      AND due_at <= NOW()
+      AND (
+        ${safeShardCount} = 1
+        OR MOD(ABS(hashtext(id)), ${safeShardCount}) = ${safeShardIndex}
+      )
+    ORDER BY due_at ASC
+    LIMIT ${limit}
+  `;
+
+  return rows as Array<{ id: string; shop_domain: string; job_type: string; payload: unknown }>;
+};
+
+const getCampaignIdFromLandingSite = (landingSite: string | null | undefined) => {
+  if (!landingSite) {
+    return null;
+  }
+
+  try {
+    const url = new URL(landingSite);
+    return url.searchParams.get('utm_campaign');
+  } catch {
+    return null;
+  }
+};
+
+export const processIngestionJob = async (jobId: string) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  const claimRows = await sql`
+    UPDATE ingestion_jobs
+    SET status = 'processing', attempts = attempts + 1, updated_at = NOW()
+    WHERE id = ${jobId}
+      AND status = 'pending'
+    RETURNING id, shop_domain, job_type, payload
+  `;
+
+  const claim = claimRows[0] as
+    | { id: string; shop_domain: string; job_type: string; payload: unknown }
+    | undefined;
+  if (!claim) {
+    return { processed: false };
+  }
+
+  try {
+    if (claim.job_type === 'pixel_event') {
+      const payload = claim.payload as PixelIngestionPayload;
+
+      const pixelEventId = await recordPixelEvent({
+        shopDomain: payload.shopDomain,
+        externalId: payload.externalId,
+        eventType: payload.eventType,
+        pageUrl: payload.pageUrl,
+        productId: payload.productId,
+        cartToken: payload.cartToken,
+        clientId: payload.clientId,
+        metadata: payload.metadata,
+      });
+
+      await recordSubscriberActivity({
+        shopDomain: payload.shopDomain,
+        externalId: payload.externalId,
+        eventType: payload.eventType,
+        pageUrl: payload.pageUrl,
+        productId: payload.productId,
+        cartToken: payload.cartToken,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          pixelEventId,
+        },
+      });
+    } else if (claim.job_type === 'shopify_order_create') {
+      const payload = claim.payload as OrderCreateIngestionPayload;
+
+      await upsertShopifyCustomer({
+        shopDomain: payload.shopDomain,
+        customerId: payload.customerId ?? null,
+        email: payload.email ?? null,
+        firstName: payload.firstName ?? null,
+        lastName: payload.lastName ?? null,
+        externalId: payload.externalId ?? null,
+        tags: payload.customerTags ?? null,
+      });
+
+      await upsertShopifyOrderEvent({
+        shopDomain: payload.shopDomain,
+        orderId: payload.orderId,
+        externalId: payload.externalId ?? null,
+        customerId: payload.customerId ?? null,
+        email: payload.email ?? null,
+        totalPriceCents: payload.totalPriceCents,
+        createdAt: payload.createdAt ?? null,
+        lineItems: payload.lineItems ?? [],
+      });
+
+      await recordAttributedConversion({
+        shopDomain: payload.shopDomain,
+        orderId: payload.orderId,
+        revenueCents: payload.totalPriceCents,
+        occurredAt: payload.createdAt ?? null,
+        externalId: payload.externalId ?? null,
+        customerId: payload.customerId ?? null,
+        email: payload.email ?? null,
+        campaignId: getCampaignIdFromLandingSite(payload.landingSite),
+        userAgent: payload.userAgent ?? null,
+        browser: payload.userAgent ?? null,
+        country: null,
+      });
+    }
+
+    await sql`
+      UPDATE ingestion_jobs
+      SET status = 'processed', processed_at = NOW(), error_message = NULL, updated_at = NOW()
+      WHERE id = ${jobId}
+    `;
+
+    return { processed: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to process ingestion job.';
+
+    await sql`
+      UPDATE ingestion_jobs
+      SET status = CASE WHEN attempts >= 5 THEN 'failed' ELSE 'pending' END,
+          error_message = ${message},
+          due_at = CASE WHEN attempts >= 5 THEN due_at ELSE NOW() + INTERVAL '2 minutes' END,
+          updated_at = NOW()
+      WHERE id = ${jobId}
+    `;
+
+    return { processed: false, error: message };
+  }
+};
+
+export const processIngestionQueue = async (input?: {
+  limit?: number;
+  maxConcurrent?: number;
+  shardCount?: number;
+  shardIndex?: number;
+}) => {
+  const limit = Math.max(1, Math.min(Number(input?.limit ?? 500), 5000));
+  const maxConcurrent = Math.max(1, Math.min(Number(input?.maxConcurrent ?? 50), 200));
+  const shardCount = Math.max(1, Math.min(Number(input?.shardCount ?? 1), 128));
+  const shardIndex = Math.max(0, Math.min(Number(input?.shardIndex ?? 0), shardCount - 1));
+
+  const jobs = await listDueIngestionJobs(limit, shardCount, shardIndex);
+  const processed = [] as Array<{ jobId: string; processed: boolean; error?: string }>;
+
+  for (let index = 0; index < jobs.length; index += maxConcurrent) {
+    const chunk = jobs.slice(index, index + maxConcurrent);
+    const results = await Promise.all(
+      chunk.map(async (job) => {
+        const result = await processIngestionJob(String(job.id));
+        return {
+          jobId: String(job.id),
+          processed: Boolean(result.processed),
+          error: result.error,
+        };
+      }),
+    );
+    processed.push(...results);
+  }
+
+  return {
+    dueJobs: jobs.length,
+    processed,
+    processedCount: processed.filter((item) => item.processed).length,
+    failedCount: processed.filter((item) => !item.processed && item.error).length,
+  };
+};
+
 export const listDueAutomationJobs = async (limit = 100, shardCount = 1, shardIndex = 0) => {
   await ensureSchema();
   const sql = getNeonSql();
   const safeShardCount = Math.max(1, Math.min(Number(shardCount) || 1, 128));
   const safeShardIndex = Math.max(0, Math.min(Number(shardIndex) || 0, safeShardCount - 1));
+
+  // If a worker crashed mid-flight, move stale processing jobs back to pending.
+  await sql`
+    UPDATE automation_jobs
+    SET status = 'pending', updated_at = NOW()
+    WHERE status = 'processing'
+      AND updated_at < NOW() - INTERVAL '10 minutes'
+  `;
 
   const rows = await sql`
     SELECT j.id, j.shop_domain, j.rule_key, j.token_id, j.subscriber_id, j.payload, t.fcm_token
@@ -1345,6 +2730,43 @@ export const listDueAutomationJobs = async (limit = 100, shardCount = 1, shardIn
   }>;
 };
 
+export const processDueAutomationJobsForShop = async (shopDomain: string, limit = 50, maxConcurrent = 10) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  const jobs = await sql`
+    SELECT id
+    FROM automation_jobs
+    WHERE shop_domain = ${shopDomain}
+      AND status = 'pending'
+      AND due_at <= NOW()
+    ORDER BY due_at ASC
+    LIMIT ${limit}
+  `;
+
+  const processed = [] as Array<{ jobId: string; processed: boolean; error?: string }>;
+
+  for (let index = 0; index < jobs.length; index += maxConcurrent) {
+    const chunk = jobs.slice(index, index + maxConcurrent);
+    const chunkResults = await Promise.all(
+      chunk.map(async (job) => {
+        const jobId = String(job.id);
+        const result = await processAutomationJob(jobId);
+        return { jobId, processed: Boolean(result.processed), error: result.error };
+      }),
+    );
+
+    processed.push(...chunkResults);
+  }
+
+  return {
+    dueJobs: jobs.length,
+    sentCount: processed.filter((item) => item.processed).length,
+    failedCount: processed.filter((item) => !item.processed && item.error).length,
+    processed,
+  };
+};
+
 export const processAutomationJob = async (jobId: string) => {
   await ensureSchema();
   const sql = getNeonSql();
@@ -1365,13 +2787,57 @@ export const processAutomationJob = async (jobId: string) => {
   }
 
   const tokenRows = await sql`
-    SELECT fcm_token, status
+    SELECT fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status
     FROM subscriber_tokens
     WHERE id = ${claim.token_id ?? 0}
     LIMIT 1
   `;
-  const token = String(tokenRows[0]?.fcm_token ?? '');
-  const tokenStatus = String(tokenRows[0]?.status ?? '');
+  let activeTokenRow = tokenRows[0];
+  let token = String(activeTokenRow?.fcm_token ?? '');
+  let tokenType = String(activeTokenRow?.token_type ?? 'fcm');
+  let tokenStatus = String(activeTokenRow?.status ?? '');
+  let deliveryTokenId = claim.token_id ?? null;
+
+  if ((!token || tokenStatus !== 'active') && claim.subscriber_id) {
+    const fallbackTokenRows = await sql`
+      SELECT id, fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status
+      FROM subscriber_tokens
+      WHERE shop_domain = ${claim.shop_domain}
+        AND subscriber_id = ${claim.subscriber_id}
+        AND status = 'active'
+      ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC
+      LIMIT 1
+    `;
+
+    if (fallbackTokenRows[0]) {
+      activeTokenRow = fallbackTokenRows[0];
+      token = String(activeTokenRow?.fcm_token ?? '');
+      tokenType = String(activeTokenRow?.token_type ?? 'fcm');
+      tokenStatus = String(activeTokenRow?.status ?? '');
+      deliveryTokenId = Number(fallbackTokenRows[0]?.id ?? 0) || deliveryTokenId;
+    }
+  }
+
+  if ((!token || tokenStatus !== 'active') && claim.payload?.externalId) {
+    const fallbackByExternalRows = await sql`
+      SELECT t.id, t.fcm_token, t.token_type, t.vapid_endpoint, t.vapid_p256dh, t.vapid_auth, t.status
+      FROM subscriber_tokens t
+      JOIN subscribers s ON s.id = t.subscriber_id
+      WHERE t.shop_domain = ${claim.shop_domain}
+        AND s.external_id = ${String(claim.payload.externalId)}
+        AND t.status = 'active'
+      ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC
+      LIMIT 1
+    `;
+
+    if (fallbackByExternalRows[0]) {
+      activeTokenRow = fallbackByExternalRows[0];
+      token = String(activeTokenRow?.fcm_token ?? '');
+      tokenType = String(activeTokenRow?.token_type ?? 'fcm');
+      tokenStatus = String(activeTokenRow?.status ?? '');
+      deliveryTokenId = Number(fallbackByExternalRows[0]?.id ?? 0) || deliveryTokenId;
+    }
+  }
 
   if (!token || tokenStatus !== 'active') {
     await sql`
@@ -1383,7 +2849,331 @@ export const processAutomationJob = async (jobId: string) => {
   }
 
   try {
-    const payload = claim.payload ?? { title: 'Notification', body: '' };
+    let payload = claim.payload ?? { title: 'Notification', body: '' };
+    let subscriberPlatform: string | null = null;
+    let subscriberBrowser: string | null = null;
+
+    if (claim.subscriber_id) {
+      const subscriberRows = await sql`
+        SELECT platform, browser
+        FROM subscribers
+        WHERE id = ${claim.subscriber_id}
+        LIMIT 1
+      `;
+      subscriberPlatform = subscriberRows[0]?.platform == null ? null : String(subscriberRows[0].platform);
+      subscriberBrowser = subscriberRows[0]?.browser == null ? null : String(subscriberRows[0].browser);
+    } else if (payload.externalId) {
+      const subscriberRows = await sql`
+        SELECT platform, browser
+        FROM subscribers
+        WHERE shop_domain = ${claim.shop_domain}
+          AND external_id = ${String(payload.externalId)}
+        LIMIT 1
+      `;
+      subscriberPlatform = subscriberRows[0]?.platform == null ? null : String(subscriberRows[0].platform);
+      subscriberBrowser = subscriberRows[0]?.browser == null ? null : String(subscriberRows[0].browser);
+    }
+
+    const ruleRows = await sql`
+      SELECT enabled, config
+      FROM automation_rules
+      WHERE shop_domain = ${claim.shop_domain}
+        AND rule_key = ${claim.rule_key}
+      LIMIT 1
+    `;
+
+    if (!Boolean(ruleRows[0]?.enabled)) {
+      await sql`
+        UPDATE automation_jobs
+        SET status = 'skipped', error_message = 'Automation rule is disabled.', updated_at = NOW()
+        WHERE id = ${jobId}
+      `;
+      return { processed: false, error: 'Automation rule is disabled.' };
+    }
+
+    const payloadMetadata = (payload.metadata ?? {}) as Record<string, unknown>;
+    const payloadStepKey = payloadMetadata.stepKey == null ? '' : String(payloadMetadata.stepKey);
+
+    if (claim.rule_key === 'welcome_subscriber' && payloadStepKey) {
+      const welcomeConfig = parseWelcomeRuleConfig(ruleRows[0]?.config ?? null);
+      const step = welcomeConfig.steps[payloadStepKey as WelcomeStepKey];
+
+      if (!step?.enabled) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Welcome reminder step is disabled.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Welcome reminder step is disabled.' };
+      }
+
+      payload = {
+        ...payload,
+        title: step.title,
+        body: step.body,
+        targetUrl: step.targetUrl ?? payload.targetUrl ?? null,
+        iconUrl: step.iconUrl ?? payload.iconUrl ?? null,
+        imageUrl: step.imageUrl ?? payload.imageUrl ?? null,
+        windowsImageUrl: step.windowsImageUrl ?? payload.windowsImageUrl ?? null,
+        macosImageUrl: step.macosImageUrl ?? payload.macosImageUrl ?? null,
+        androidImageUrl: step.androidImageUrl ?? payload.androidImageUrl ?? null,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          stepKey: payloadStepKey,
+          actionButtons: step.actionButtons ?? [],
+        },
+      };
+
+      const payloadExternalId = payload.externalId == null ? '' : String(payload.externalId);
+      if (payloadExternalId) {
+        const canonicalWelcomeRows = await sql`
+          SELECT id
+          FROM automation_jobs
+          WHERE shop_domain = ${claim.shop_domain}
+            AND rule_key = 'welcome_subscriber'
+            AND payload ->> 'externalId' = ${payloadExternalId}
+            AND payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+            AND status IN ('pending', 'processing', 'sent')
+          ORDER BY created_at ASC
+          LIMIT 1
+        `;
+
+        const canonicalWelcomeJobId = canonicalWelcomeRows[0]?.id == null ? '' : String(canonicalWelcomeRows[0].id);
+        if (canonicalWelcomeJobId && canonicalWelcomeJobId !== claim.id) {
+          await sql`
+            UPDATE automation_jobs
+            SET status = 'skipped', error_message = 'Duplicate welcome reminder job suppressed.', updated_at = NOW()
+            WHERE id = ${jobId}
+          `;
+          return { processed: false, error: 'Duplicate welcome reminder job suppressed.' };
+        }
+
+        const existingDeliveryRows = await sql`
+          SELECT d.automation_job_id
+          FROM automation_deliveries d
+          JOIN automation_jobs j ON j.id = d.automation_job_id
+          WHERE d.shop_domain = ${claim.shop_domain}
+            AND d.rule_key = 'welcome_subscriber'
+            AND d.external_id = ${payloadExternalId}
+            AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+          ORDER BY d.delivered_at DESC
+          LIMIT 1
+        `;
+
+        const existingDeliveryJobId = existingDeliveryRows[0]?.automation_job_id == null ? '' : String(existingDeliveryRows[0].automation_job_id);
+        if (existingDeliveryJobId && existingDeliveryJobId !== claim.id) {
+          await sql`
+            UPDATE automation_jobs
+            SET status = 'skipped', error_message = 'Welcome reminder already delivered for this step.', updated_at = NOW()
+            WHERE id = ${jobId}
+          `;
+          return { processed: false, error: 'Welcome reminder already delivered for this step.' };
+        }
+      }
+
+      const tokenDeliveryRows = await sql`
+        SELECT d.automation_job_id
+        FROM automation_deliveries d
+        JOIN automation_jobs j ON j.id = d.automation_job_id
+        WHERE d.shop_domain = ${claim.shop_domain}
+          AND d.rule_key = 'welcome_subscriber'
+          AND d.token_id = ${deliveryTokenId ?? 0}
+          AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+        ORDER BY d.delivered_at DESC
+        LIMIT 1
+      `;
+
+      if (tokenDeliveryRows[0]?.automation_job_id) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Welcome reminder already delivered to token for this step.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Welcome reminder already delivered to token for this step.' };
+      }
+
+      if (claim.subscriber_id) {
+        const subscriberDeliveryRows = await sql`
+          SELECT d.automation_job_id
+          FROM automation_deliveries d
+          JOIN automation_jobs j ON j.id = d.automation_job_id
+          WHERE d.shop_domain = ${claim.shop_domain}
+            AND d.rule_key = 'welcome_subscriber'
+            AND d.subscriber_id = ${claim.subscriber_id}
+            AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+          ORDER BY d.delivered_at DESC
+          LIMIT 1
+        `;
+
+        if (subscriberDeliveryRows[0]?.automation_job_id) {
+          await sql`
+            UPDATE automation_jobs
+            SET status = 'skipped', error_message = 'Welcome reminder already delivered to subscriber for this step.', updated_at = NOW()
+            WHERE id = ${jobId}
+          `;
+          return { processed: false, error: 'Welcome reminder already delivered to subscriber for this step.' };
+        }
+      }
+    }
+
+    if (claim.rule_key === 'cart_abandonment_30m' && payloadStepKey) {
+      const cartConfig = parseCartRuleConfig(ruleRows[0]?.config ?? null);
+      const step = cartConfig.steps[payloadStepKey as CartStepKey];
+
+      if (!step?.enabled) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Cart reminder step is disabled.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Cart reminder step is disabled.' };
+      }
+
+      payload = {
+        ...payload,
+        title: step.title,
+        body: step.body,
+        targetUrl: step.targetUrl ?? payload.targetUrl ?? null,
+        iconUrl: step.iconUrl ?? payload.iconUrl ?? null,
+        imageUrl: step.imageUrl ?? payload.imageUrl ?? null,
+        windowsImageUrl: step.windowsImageUrl ?? payload.windowsImageUrl ?? null,
+        macosImageUrl: step.macosImageUrl ?? payload.macosImageUrl ?? null,
+        androidImageUrl: step.androidImageUrl ?? payload.androidImageUrl ?? null,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          stepKey: payloadStepKey,
+          actionButtons: step.actionButtons ?? [],
+        },
+      };
+    }
+
+    if (claim.rule_key === 'browse_abandonment_15m' && payloadStepKey) {
+      const browseConfig = parseBrowseRuleConfig(ruleRows[0]?.config ?? null);
+      const step = browseConfig.steps[payloadStepKey as BrowseStepKey];
+
+      if (!step?.enabled) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Browse reminder step is disabled.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Browse reminder step is disabled.' };
+      }
+
+      payload = {
+        ...payload,
+        title: step.title,
+        body: step.body,
+        targetUrl: step.targetUrl ?? payload.targetUrl ?? null,
+        iconUrl: step.iconUrl ?? payload.iconUrl ?? null,
+        imageUrl: step.imageUrl ?? payload.imageUrl ?? null,
+        windowsImageUrl: step.windowsImageUrl ?? payload.windowsImageUrl ?? null,
+        macosImageUrl: step.macosImageUrl ?? payload.macosImageUrl ?? null,
+        androidImageUrl: step.androidImageUrl ?? payload.androidImageUrl ?? null,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          stepKey: payloadStepKey,
+          actionButtons: step.actionButtons ?? [],
+        },
+      };
+    }
+
+    if (claim.rule_key === 'shipping_notifications') {
+      const shippingConfig = parseShippingRuleConfig(ruleRows[0]?.config ?? null);
+      const stepKey = (payloadStepKey || 'shipping-1') as ShippingStepKey;
+      const step = shippingConfig.steps[stepKey];
+
+      if (!step?.enabled) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Shipping notification step is disabled.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Shipping notification step is disabled.' };
+      }
+
+      payload = {
+        ...payload,
+        title: step.title || payload.title,
+        body: step.body || payload.body,
+        targetUrl: step.targetUrl ?? payload.targetUrl ?? null,
+        iconUrl: step.iconUrl ?? payload.iconUrl ?? null,
+        imageUrl: step.imageUrl ?? payload.imageUrl ?? null,
+        windowsImageUrl: step.windowsImageUrl ?? payload.windowsImageUrl ?? null,
+        macosImageUrl: step.macosImageUrl ?? payload.macosImageUrl ?? null,
+        androidImageUrl: step.androidImageUrl ?? payload.androidImageUrl ?? null,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          stepKey,
+          actionButtons: step.actionButtons ?? [],
+        },
+      };
+    }
+
+    if (claim.rule_key === 'back_in_stock') {
+      const backInStockConfig = parseBackInStockRuleConfig(ruleRows[0]?.config ?? null);
+      const stepKey = (payloadStepKey || 'stock-1') as BackInStockStepKey;
+      const step = backInStockConfig.steps[stepKey];
+
+      if (!step?.enabled) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Back-in-stock notification step is disabled.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Back-in-stock notification step is disabled.' };
+      }
+
+      payload = {
+        ...payload,
+        title: step.title || payload.title,
+        body: step.body || payload.body,
+        targetUrl: step.targetUrl ?? payload.targetUrl ?? null,
+        iconUrl: step.iconUrl ?? payload.iconUrl ?? null,
+        imageUrl: step.imageUrl ?? payload.imageUrl ?? null,
+        windowsImageUrl: step.windowsImageUrl ?? payload.windowsImageUrl ?? null,
+        macosImageUrl: step.macosImageUrl ?? payload.macosImageUrl ?? null,
+        androidImageUrl: step.androidImageUrl ?? payload.androidImageUrl ?? null,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          stepKey,
+          actionButtons: step.actionButtons ?? [],
+        },
+      };
+    }
+
+    if (claim.rule_key === 'price_drop') {
+      const priceDropConfig = parsePriceDropRuleConfig(ruleRows[0]?.config ?? null);
+      const stepKey = (payloadStepKey || 'price-1') as PriceDropStepKey;
+      const step = priceDropConfig.steps[stepKey];
+
+      if (!step?.enabled) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Price-drop notification step is disabled.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Price-drop notification step is disabled.' };
+      }
+
+      payload = {
+        ...payload,
+        title: step.title || payload.title,
+        body: step.body || payload.body,
+        targetUrl: step.targetUrl ?? payload.targetUrl ?? null,
+        iconUrl: step.iconUrl ?? payload.iconUrl ?? null,
+        imageUrl: step.imageUrl ?? payload.imageUrl ?? null,
+        windowsImageUrl: step.windowsImageUrl ?? payload.windowsImageUrl ?? null,
+        macosImageUrl: step.macosImageUrl ?? payload.macosImageUrl ?? null,
+        androidImageUrl: step.androidImageUrl ?? payload.androidImageUrl ?? null,
+        metadata: {
+          ...(payload.metadata ?? {}),
+          stepKey,
+          actionButtons: step.actionButtons ?? [],
+        },
+      };
+    }
+
     const skipReason = await getAutomationSkipReason(claim.shop_domain, payload);
     if (skipReason) {
       await sql`
@@ -1394,32 +3184,129 @@ export const processAutomationJob = async (jobId: string) => {
       return { processed: false, error: skipReason };
     }
 
-    const messaging = getFirebaseAdminMessaging();
-    const trackedTargetUrl = payload.ruleKey
-      ? buildAutomationTrackedUrl(payload.targetUrl ?? null, payload.ruleKey, claim.shop_domain, payload.externalId ?? null)
-      : payload.targetUrl ?? null;
-    const message = {
-      token,
-      notification: {
-        title: payload.title,
-        body: payload.body,
-        imageUrl: payload.imageUrl ?? undefined,
-      },
-      webpush: {
-        fcmOptions: { link: trackedTargetUrl ?? undefined },
-        notification: {
-          icon: payload.iconUrl ?? undefined,
-          image: payload.imageUrl ?? undefined,
-        },
-      },
-      data: {
-        source: 'automation',
-        ruleKey: String(payload.ruleKey ?? ''),
-        url: trackedTargetUrl ?? payload.targetUrl ?? '',
+    const destination = await resolveAutomationDestination(claim.shop_domain, payload);
+    payload = {
+      ...payload,
+      targetUrl: destination.targetUrl,
+      iconUrl: destination.iconUrl,
+      imageUrl: selectAutomationImageForDevice({
+        ...payload,
+        imageUrl: destination.imageUrl,
+        windowsImageUrl: destination.windowsImageUrl,
+        macosImageUrl: destination.macosImageUrl,
+        androidImageUrl: destination.androidImageUrl,
+      }, subscriberPlatform, subscriberBrowser),
+      windowsImageUrl: destination.windowsImageUrl,
+      macosImageUrl: destination.macosImageUrl,
+      androidImageUrl: destination.androidImageUrl,
+      metadata: {
+        ...(payload.metadata ?? {}),
+        actionButtons: destination.actionButtons,
       },
     };
 
-    const fcmMessageId = await messaging.send(message);
+    const effectiveRuleKey = (payload.ruleKey ?? claim.rule_key) as AutomationRuleKey;
+    const trackedTargetUrl = buildAutomationTrackedUrl(
+      payload.targetUrl ?? null,
+      effectiveRuleKey,
+      claim.shop_domain,
+      payload.externalId ?? null,
+    ) ?? payload.targetUrl ?? null;
+
+    let fcmMessageId: string;
+
+    const rawActionButtons = Array.isArray((payload.metadata ?? {}).actionButtons)
+      ? ((payload.metadata ?? {}).actionButtons as Array<Record<string, unknown>>)
+      : [];
+    const automationActions = rawActionButtons
+      .slice(0, 2)
+      .filter((btn) => btn?.title && btn?.link)
+      .map((btn, i) => ({ action: `btn_${i + 1}`, title: String(btn.title) }));
+    const automationButton1Url = rawActionButtons[0]?.link
+      ? buildAutomationTrackedUrl(String(rawActionButtons[0].link), effectiveRuleKey, claim.shop_domain, payload.externalId ?? null)
+      : (rawActionButtons[0]?.link ? String(rawActionButtons[0].link) : '');
+    const automationButton2Url = rawActionButtons[1]?.link
+      ? buildAutomationTrackedUrl(String(rawActionButtons[1].link), effectiveRuleKey, claim.shop_domain, payload.externalId ?? null)
+      : (rawActionButtons[1]?.link ? String(rawActionButtons[1].link) : '');
+    const primaryTrackUrl = buildAutomationClickTrackingUrl(
+      trackedTargetUrl,
+      effectiveRuleKey,
+      claim.shop_domain,
+      payload.externalId ?? null,
+    );
+    const button1TrackUrl = buildAutomationClickTrackingUrl(
+      automationButton1Url,
+      effectiveRuleKey,
+      claim.shop_domain,
+      payload.externalId ?? null,
+    );
+    const button2TrackUrl = buildAutomationClickTrackingUrl(
+      automationButton2Url,
+      effectiveRuleKey,
+      claim.shop_domain,
+      payload.externalId ?? null,
+    );
+    const automationAction1Title = automationActions[0]?.title ?? '';
+    const automationAction2Title = automationActions[1]?.title ?? '';
+
+    if (tokenType === 'vapid') {
+      // VAPID send for Firefox / Safari
+      const vapidEndpoint = String(activeTokenRow?.vapid_endpoint ?? '');
+      const vapidP256dh = String(activeTokenRow?.vapid_p256dh ?? '');
+      const vapidAuth = String(activeTokenRow?.vapid_auth ?? '');
+      if (!vapidEndpoint || !vapidP256dh || !vapidAuth) {
+        throw new Error('Incomplete VAPID subscription data.');
+      }
+      fcmMessageId = await sendVapidPushNotification(
+        { endpoint: vapidEndpoint, keys: { p256dh: vapidP256dh, auth: vapidAuth } },
+        {
+          title: payload.title,
+          body: payload.body,
+          icon: payload.iconUrl ?? null,
+          image: payload.imageUrl ?? null,
+          url: trackedTargetUrl ?? payload.targetUrl ?? null,
+          actions: automationActions,
+          button1Url: automationButton1Url || null,
+          button2Url: automationButton2Url || null,
+          trackPrimaryUrl: primaryTrackUrl || null,
+          trackButton1Url: button1TrackUrl || null,
+          trackButton2Url: button2TrackUrl || null,
+        },
+      );
+    } else {
+      // FCM send for Chrome / Edge / Opera / Samsung
+      const messaging = getFirebaseAdminMessaging();
+      const message = {
+        token,
+        notification: {
+          title: payload.title,
+          body: payload.body,
+          imageUrl: payload.imageUrl ?? undefined,
+        },
+        webpush: {
+          fcmOptions: { link: trackedTargetUrl ?? undefined },
+          notification: {
+            icon: payload.iconUrl ?? undefined,
+            image: payload.imageUrl ?? undefined,
+            actions: automationActions.length > 0 ? automationActions : undefined,
+          },
+        },
+        data: {
+          source: 'automation',
+          ruleKey: String(payload.ruleKey ?? ''),
+          url: trackedTargetUrl ?? payload.targetUrl ?? '',
+          button1Url: automationButton1Url ?? '',
+          button2Url: automationButton2Url ?? '',
+          trackPrimaryUrl: primaryTrackUrl,
+          trackButton1Url: button1TrackUrl,
+          trackButton2Url: button2TrackUrl,
+          action1Title: automationAction1Title,
+          action2Title: automationAction2Title,
+        },
+      };
+
+      fcmMessageId = await messaging.send(message);
+    }
 
     await sql`
       UPDATE automation_jobs
@@ -1443,7 +3330,7 @@ export const processAutomationJob = async (jobId: string) => {
         ${payload.ruleKey ?? claim.rule_key},
         ${claim.shop_domain},
         ${claim.subscriber_id ?? null},
-        ${claim.token_id ?? null},
+        ${deliveryTokenId},
         ${payload.externalId ?? null},
         ${payload.targetUrl ?? null},
         ${fcmMessageId}
@@ -1527,31 +3414,89 @@ export const recordSubscriberActivity = async (input: {
   };
 
   if (input.eventType === 'product_view') {
-    await queueRule(
-      'browse_abandonment_15m',
-      15,
-      `browse15:${input.shopDomain}:${input.externalId}:${input.productId ?? input.pageUrl ?? 'unknown'}`,
-      {
-        title: 'Still thinking about it?',
-        body: 'The item you viewed is still available. Come back before it sells out.',
-        targetUrl: input.pageUrl ?? null,
-        campaignLabel: 'browse_abandonment_15m',
-      },
-    );
+    const rule = await getRuleConfig(input.shopDomain, 'browse_abandonment_15m');
+    if (rule.enabled) {
+      const browseConfig = parseBrowseRuleConfig(rule.config);
+      const targets = await listAutomationTargets({ shopDomain: input.shopDomain, externalId: input.externalId });
+
+      for (const stepKey of Object.keys(browseConfig.steps) as BrowseStepKey[]) {
+        const step = browseConfig.steps[stepKey];
+        if (!step.enabled || targets.length === 0) {
+          continue;
+        }
+
+        const dueAt = new Date(Date.now() + step.delayMinutes * 60 * 1000);
+        await enqueueAutomationForTargets({
+          shopDomain: input.shopDomain,
+          ruleKey: 'browse_abandonment_15m',
+          targets,
+          dedupeKeyBase: `browse15:${input.shopDomain}:${input.externalId}:${input.productId ?? input.pageUrl ?? 'unknown'}:${stepKey}`,
+          dueAt,
+          payload: {
+            title: step.title,
+            body: step.body,
+            targetUrl: step.targetUrl ?? input.pageUrl ?? null,
+            iconUrl: step.iconUrl ?? null,
+            imageUrl: step.imageUrl ?? null,
+            windowsImageUrl: step.windowsImageUrl ?? null,
+            macosImageUrl: step.macosImageUrl ?? null,
+            androidImageUrl: step.androidImageUrl ?? null,
+            campaignLabel: `browse_abandonment_15m:${stepKey}`,
+            metadata: {
+              stepKey,
+              actionButtons: step.actionButtons ?? [],
+            },
+            externalId: input.externalId,
+            productId: input.productId ?? null,
+            cartToken: input.cartToken ?? null,
+            triggeredAt,
+          },
+        });
+      }
+    }
   }
 
   if (input.eventType === 'add_to_cart') {
-    await queueRule(
-      'cart_abandonment_30m',
-      30,
-      `cart30:${input.shopDomain}:${input.externalId}:${input.cartToken ?? input.productId ?? input.pageUrl ?? 'unknown'}`,
-      {
-        title: 'Your cart is waiting',
-        body: 'You left something behind. Complete your purchase before stock runs out.',
-        targetUrl: input.pageUrl ?? '/cart',
-        campaignLabel: 'cart_abandonment_30m',
-      },
-    );
+    const rule = await getRuleConfig(input.shopDomain, 'cart_abandonment_30m');
+    if (rule.enabled) {
+      const cartConfig = parseCartRuleConfig(rule.config);
+      const targets = await listAutomationTargets({ shopDomain: input.shopDomain, externalId: input.externalId });
+
+      for (const stepKey of Object.keys(cartConfig.steps) as CartStepKey[]) {
+        const step = cartConfig.steps[stepKey];
+        if (!step.enabled || targets.length === 0) {
+          continue;
+        }
+
+        const dueAt = new Date(Date.now() + step.delayMinutes * 60 * 1000);
+        await enqueueAutomationForTargets({
+          shopDomain: input.shopDomain,
+          ruleKey: 'cart_abandonment_30m',
+          targets,
+          dedupeKeyBase: `cart30:${input.shopDomain}:${input.externalId}:${input.cartToken ?? input.productId ?? input.pageUrl ?? 'unknown'}:${stepKey}`,
+          dueAt,
+          payload: {
+            title: step.title,
+            body: step.body,
+            targetUrl: step.targetUrl ?? input.pageUrl ?? '/cart',
+            iconUrl: step.iconUrl ?? null,
+            imageUrl: step.imageUrl ?? null,
+            windowsImageUrl: step.windowsImageUrl ?? null,
+            macosImageUrl: step.macosImageUrl ?? null,
+            androidImageUrl: step.androidImageUrl ?? null,
+            campaignLabel: `cart_abandonment_30m:${stepKey}`,
+            metadata: {
+              stepKey,
+              actionButtons: step.actionButtons ?? [],
+            },
+            externalId: input.externalId,
+            productId: input.productId ?? null,
+            cartToken: input.cartToken ?? null,
+            triggeredAt,
+          },
+        });
+      }
+    }
   }
 
   if (input.eventType === 'checkout_start') {
@@ -2169,6 +4114,7 @@ export const upsertShopifyProductVariants = async (input: UpsertShopifyProductVa
       productId: input.productId,
       triggeredAt: updatedAt.toISOString(),
       metadata: {
+        stepKey: 'price-1',
         variantIds: priceDropCandidates,
       },
     },
@@ -2232,6 +4178,7 @@ export const processInventoryLevelUpdate = async (input: ProcessInventoryLevelUp
         productId: candidate.productId,
         triggeredAt: updatedAt.toISOString(),
         metadata: {
+          stepKey: 'stock-1',
           variantId: candidate.variantId,
           inventoryItemId: input.inventoryItemId,
           available: input.available,
@@ -2341,6 +4288,7 @@ export const processFulfillmentUpdate = async (input: ProcessFulfillmentUpdateIn
       orderId: input.orderId,
       triggeredAt: updatedAt.toISOString(),
       metadata: {
+        stepKey: 'shipping-1',
         fulfillmentId: input.fulfillmentId,
         shipmentStatus: input.shipmentStatus ?? null,
         status: input.status ?? null,
@@ -2494,30 +4442,60 @@ export const resolveCampaignAudience = async (
   const sql = getNeonSql();
 
   if (!segmentId || segmentId === 'all') {
-    const rows = await sql`
-      SELECT
-        t.id AS token_id,
-        t.fcm_token,
-        s.id AS subscriber_id,
-        s.external_id,
-        s.platform
-      FROM subscribers s
-      JOIN subscriber_tokens t ON t.subscriber_id = s.id
-      WHERE s.shop_domain = ${shopDomain}
-        AND t.shop_domain = ${shopDomain}
-        AND t.status = 'active'
-        AND (
-          ${excludeDeliveredCampaignId ?? null} IS NULL
-          OR NOT EXISTS (
+    const rows = excludeDeliveredCampaignId
+      ? await sql`
+        SELECT
+          t.id AS token_id,
+          t.fcm_token,
+          t.token_type,
+          t.vapid_endpoint,
+          t.vapid_p256dh,
+          t.vapid_auth,
+          s.id AS subscriber_id,
+          s.external_id,
+          s.platform
+        FROM subscribers s
+        JOIN subscriber_tokens t ON t.subscriber_id = s.id
+        WHERE s.shop_domain = ${shopDomain}
+          AND t.shop_domain = ${shopDomain}
+          AND t.status = 'active'
+          AND NOT EXISTS (
             SELECT 1
             FROM campaign_deliveries cd
-            WHERE cd.campaign_id = ${excludeDeliveredCampaignId ?? null}
+            WHERE cd.campaign_id = ${excludeDeliveredCampaignId}
               AND cd.token_id = t.id
           )
-        )
-      ORDER BY t.last_seen_at DESC, t.updated_at DESC, t.id DESC
-    `;
-    return rows as Array<{ token_id: string | number; fcm_token: string; subscriber_id: string | number; external_id: string | null; platform: string | null }>;
+        ORDER BY t.last_seen_at DESC, t.updated_at DESC, t.id DESC
+      `
+      : await sql`
+        SELECT
+          t.id AS token_id,
+          t.fcm_token,
+          t.token_type,
+          t.vapid_endpoint,
+          t.vapid_p256dh,
+          t.vapid_auth,
+          s.id AS subscriber_id,
+          s.external_id,
+          s.platform
+        FROM subscribers s
+        JOIN subscriber_tokens t ON t.subscriber_id = s.id
+        WHERE s.shop_domain = ${shopDomain}
+          AND t.shop_domain = ${shopDomain}
+          AND t.status = 'active'
+        ORDER BY t.last_seen_at DESC, t.updated_at DESC, t.id DESC
+      `;
+    return rows as Array<{
+      token_id: string | number;
+      fcm_token: string;
+      token_type: string | null;
+      vapid_endpoint: string | null;
+      vapid_p256dh: string | null;
+      vapid_auth: string | null;
+      subscriber_id: string | number;
+      external_id: string | null;
+      platform: string | null;
+    }>;
   }
 
   const segmentRows = await sql`
@@ -2534,31 +4512,61 @@ export const resolveCampaignAudience = async (
     return [];
   }
 
-  const rows = await sql`
-    SELECT
-      t.id AS token_id,
-      t.fcm_token,
-      s.id AS subscriber_id,
-      s.external_id,
-      s.platform
-    FROM subscribers s
-    JOIN subscriber_tokens t ON t.subscriber_id = s.id
-    WHERE s.shop_domain = ${shopDomain}
-      AND t.shop_domain = ${shopDomain}
-      AND t.status = 'active'
-      AND (
-        ${excludeDeliveredCampaignId ?? null} IS NULL
-        OR NOT EXISTS (
+  const rows = excludeDeliveredCampaignId
+    ? await sql`
+      SELECT
+        t.id AS token_id,
+        t.fcm_token,
+        t.token_type,
+        t.vapid_endpoint,
+        t.vapid_p256dh,
+        t.vapid_auth,
+        s.id AS subscriber_id,
+        s.external_id,
+        s.platform
+      FROM subscribers s
+      JOIN subscriber_tokens t ON t.subscriber_id = s.id
+      WHERE s.shop_domain = ${shopDomain}
+        AND t.shop_domain = ${shopDomain}
+        AND t.status = 'active'
+        AND NOT EXISTS (
           SELECT 1
           FROM campaign_deliveries cd
-          WHERE cd.campaign_id = ${excludeDeliveredCampaignId ?? null}
+          WHERE cd.campaign_id = ${excludeDeliveredCampaignId}
             AND cd.token_id = t.id
         )
-      )
-    ORDER BY t.last_seen_at DESC, t.updated_at DESC, t.id DESC
-  `;
+      ORDER BY t.last_seen_at DESC, t.updated_at DESC, t.id DESC
+    `
+    : await sql`
+      SELECT
+        t.id AS token_id,
+        t.fcm_token,
+        t.token_type,
+        t.vapid_endpoint,
+        t.vapid_p256dh,
+        t.vapid_auth,
+        s.id AS subscriber_id,
+        s.external_id,
+        s.platform
+      FROM subscribers s
+      JOIN subscriber_tokens t ON t.subscriber_id = s.id
+      WHERE s.shop_domain = ${shopDomain}
+        AND t.shop_domain = ${shopDomain}
+        AND t.status = 'active'
+      ORDER BY t.last_seen_at DESC, t.updated_at DESC, t.id DESC
+    `;
 
-  return (rows as Array<{ token_id: string | number; fcm_token: string; subscriber_id: string | number; external_id: string | null; platform: string | null }>).filter((row) =>
+  return (rows as Array<{
+    token_id: string | number;
+    fcm_token: string;
+    token_type: string | null;
+    vapid_endpoint: string | null;
+    vapid_p256dh: string | null;
+    vapid_auth: string | null;
+    subscriber_id: string | number;
+    external_id: string | null;
+    platform: string | null;
+  }>).filter((row) =>
     allowedIds.has(Number(row.subscriber_id)),
   );
 };
@@ -2776,13 +4784,17 @@ export const upsertSubscriberToken = async (input: UpsertTokenInput) => {
   const subscriberId = Number(subscriberRows[0]?.id);
 
   const tokenRows = await sql`
-    INSERT INTO subscriber_tokens (shop_domain, subscriber_id, fcm_token, user_agent, status, updated_at, last_seen_at)
+    INSERT INTO subscriber_tokens (shop_domain, subscriber_id, fcm_token, user_agent, status, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, updated_at, last_seen_at)
     VALUES (
       ${input.shopDomain},
       ${subscriberId},
       ${input.token},
       ${input.userAgent ?? null},
       'active',
+      ${input.tokenType ?? 'fcm'},
+      ${input.vapidEndpoint ?? null},
+      ${input.vapidP256dh ?? null},
+      ${input.vapidAuth ?? null},
       NOW(),
       NOW()
     )
@@ -2790,38 +4802,101 @@ export const upsertSubscriberToken = async (input: UpsertTokenInput) => {
     DO UPDATE SET
       subscriber_id = EXCLUDED.subscriber_id,
       user_agent = EXCLUDED.user_agent,
+      token_type = EXCLUDED.token_type,
+      vapid_endpoint = COALESCE(EXCLUDED.vapid_endpoint, subscriber_tokens.vapid_endpoint),
+      vapid_p256dh = COALESCE(EXCLUDED.vapid_p256dh, subscriber_tokens.vapid_p256dh),
+      vapid_auth = COALESCE(EXCLUDED.vapid_auth, subscriber_tokens.vapid_auth),
       status = 'active',
       updated_at = NOW(),
       last_seen_at = NOW()
-    RETURNING id
+    RETURNING id, (xmax = 0) AS was_inserted
   `;
 
   const tokenId = Number(tokenRows[0]?.id);
+  const tokenWasInserted = Boolean(tokenRows[0]?.was_inserted);
 
   const welcomeRuleRows = await sql`
-    SELECT enabled
+    SELECT enabled, config
     FROM automation_rules
     WHERE shop_domain = ${input.shopDomain}
       AND rule_key = 'welcome_subscriber'
     LIMIT 1
   `;
 
-  if (Boolean(welcomeRuleRows[0]?.enabled)) {
-    await enqueueAutomationJob({
-      shopDomain: input.shopDomain,
-      ruleKey: 'welcome_subscriber',
-      tokenId,
-      subscriberId,
-      dedupeKey: `welcome:${input.shopDomain}:${input.token}`,
-      payload: {
-        title: 'Thanks for subscribing',
-        body: 'You will now receive updates, offers, and reminders from this store.',
-        campaignLabel: 'welcome_subscriber',
+  if (Boolean(welcomeRuleRows[0]?.enabled) && tokenWasInserted) {
+    const existingWelcomeJobRows = await sql`
+      SELECT id
+      FROM automation_jobs
+      WHERE shop_domain = ${input.shopDomain}
+        AND rule_key = 'welcome_subscriber'
+        AND payload ->> 'externalId' = ${input.externalId}
+        AND status IN ('pending', 'processing', 'sent')
+      LIMIT 1
+    `;
+
+    const existingWelcomeDeliveryRows = await sql`
+      SELECT id
+      FROM automation_deliveries
+      WHERE shop_domain = ${input.shopDomain}
+        AND rule_key = 'welcome_subscriber'
+        AND external_id = ${input.externalId}
+      LIMIT 1
+    `;
+
+    if (existingWelcomeJobRows.length > 0 || existingWelcomeDeliveryRows.length > 0) {
+      return {
+        subscriberId,
+        tokenId,
+      };
+    }
+
+    const welcomeConfig = parseWelcomeRuleConfig(welcomeRuleRows[0]?.config ?? null);
+    const now = Date.now();
+    const immediateWelcomeJobIds: string[] = [];
+
+    for (const stepKey of Object.keys(welcomeConfig.steps) as WelcomeStepKey[]) {
+      const step = welcomeConfig.steps[stepKey];
+      if (!step.enabled) {
+        continue;
+      }
+
+      const dueAt = new Date(now + step.delayMinutes * 60_000);
+
+      const jobId = await enqueueAutomationJob({
+        shopDomain: input.shopDomain,
         ruleKey: 'welcome_subscriber',
-        externalId: input.externalId,
-        triggeredAt: new Date().toISOString(),
-      },
-    });
+        tokenId,
+        subscriberId,
+        dedupeKey: `welcome:${input.shopDomain}:external:${input.externalId}:${stepKey}`,
+        dueAt,
+        payload: {
+          title: step.title,
+          body: step.body,
+          targetUrl: step.targetUrl ?? null,
+          iconUrl: step.iconUrl ?? null,
+          imageUrl: step.imageUrl ?? null,
+          windowsImageUrl: step.windowsImageUrl ?? null,
+          macosImageUrl: step.macosImageUrl ?? null,
+          androidImageUrl: step.androidImageUrl ?? null,
+          metadata: {
+            stepKey,
+            actionButtons: step.actionButtons ?? [],
+          },
+          campaignLabel: `welcome_subscriber:${stepKey}`,
+          ruleKey: 'welcome_subscriber',
+          externalId: input.externalId,
+          triggeredAt: new Date().toISOString(),
+        },
+      });
+
+      if (step.delayMinutes <= 0 && jobId) {
+        immediateWelcomeJobIds.push(jobId);
+      }
+    }
+
+    if (immediateWelcomeJobIds.length > 0) {
+      await Promise.all(immediateWelcomeJobIds.map((jobId) => processAutomationJob(jobId)));
+    }
   }
 
   return {
@@ -3242,6 +5317,153 @@ export const getCampaignResults = async (shopDomain: string, campaignId: string)
   };
 };
 
+export const getAnalyticsStats = async (shopDomain: string, from?: Date | null, to?: Date | null) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  const start = from ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const end = to ?? new Date();
+
+  const [
+    campaignKpiRows,
+    autoDeliveryRows,
+    autoClickRows,
+    subscriberRows,
+    dailyRevenueRows,
+    topCampaignRows,
+    topAutoRows,
+    topAutoClickRows,
+  ] = await Promise.all([
+    sql`
+      SELECT
+        COALESCE(SUM(delivery_count), 0)::BIGINT AS impressions,
+        COALESCE(SUM(click_count), 0)::BIGINT AS clicks,
+        COALESCE(SUM(revenue_cents), 0)::BIGINT AS revenue_cents
+      FROM campaigns
+      WHERE shop_domain = ${shopDomain}
+        AND created_at >= ${start} AND created_at <= ${end}
+    `,
+    sql`
+      SELECT
+        COUNT(*)::BIGINT AS impressions,
+        COALESCE(SUM(revenue_cents), 0)::BIGINT AS revenue_cents
+      FROM automation_deliveries
+      WHERE shop_domain = ${shopDomain}
+        AND delivered_at >= ${start} AND delivered_at <= ${end}
+    `,
+    sql`
+      SELECT
+        COUNT(*)::BIGINT AS clicks,
+        COALESCE(SUM(revenue_cents), 0)::BIGINT AS revenue_cents
+      FROM automation_clicks
+      WHERE shop_domain = ${shopDomain}
+        AND clicked_at >= ${start} AND clicked_at <= ${end}
+    `,
+    sql`
+      SELECT COUNT(*)::BIGINT AS count
+      FROM subscribers
+      WHERE shop_domain = ${shopDomain}
+        AND created_at >= ${start} AND created_at <= ${end}
+    `,
+    sql`
+      SELECT
+        DATE(created_at AT TIME ZONE 'UTC')::TEXT AS date,
+        COALESCE(SUM(revenue_cents), 0)::BIGINT AS revenue_cents
+      FROM campaigns
+      WHERE shop_domain = ${shopDomain}
+        AND created_at >= ${start} AND created_at <= ${end}
+      GROUP BY DATE(created_at AT TIME ZONE 'UTC')
+      ORDER BY 1 ASC
+    `,
+    sql`
+      SELECT id, title, delivery_count, click_count, revenue_cents
+      FROM campaigns
+      WHERE shop_domain = ${shopDomain}
+        AND created_at >= ${start} AND created_at <= ${end}
+      ORDER BY revenue_cents DESC NULLS LAST
+      LIMIT 5
+    `,
+    sql`
+      SELECT
+        rule_key,
+        COUNT(*)::BIGINT AS impressions,
+        COALESCE(SUM(revenue_cents), 0)::BIGINT AS revenue_cents
+      FROM automation_deliveries
+      WHERE shop_domain = ${shopDomain}
+        AND delivered_at >= ${start} AND delivered_at <= ${end}
+      GROUP BY rule_key
+      ORDER BY revenue_cents DESC NULLS LAST
+      LIMIT 5
+    `,
+    sql`
+      SELECT rule_key, COUNT(*)::BIGINT AS clicks
+      FROM automation_clicks
+      WHERE shop_domain = ${shopDomain}
+        AND clicked_at >= ${start} AND clicked_at <= ${end}
+      GROUP BY rule_key
+    `,
+  ]);
+
+  const clicksByRule = new Map(topAutoClickRows.map((r) => [String(r.rule_key), Number(r.clicks ?? 0)]));
+
+  const campaignImpressions = Number(campaignKpiRows[0]?.impressions ?? 0);
+  const campaignClicks = Number(campaignKpiRows[0]?.clicks ?? 0);
+  const campaignRevenueCents = Number(campaignKpiRows[0]?.revenue_cents ?? 0);
+
+  const autoImpressions = Number(autoDeliveryRows[0]?.impressions ?? 0);
+  const autoClicks = Number(autoClickRows[0]?.clicks ?? 0);
+  const autoRevenueCents =
+    Number(autoDeliveryRows[0]?.revenue_cents ?? 0) + Number(autoClickRows[0]?.revenue_cents ?? 0);
+
+  const totalImpressions = campaignImpressions + autoImpressions;
+  const totalClicks = campaignClicks + autoClicks;
+  const totalRevenueCents = campaignRevenueCents + autoRevenueCents;
+
+  const ruleKeyLabels: Record<string, string> = {
+    welcome_subscriber: 'Welcome notifications',
+    browse_abandonment_15m: 'Browse abandonment',
+    cart_abandonment_30m: 'Abandoned cart recovery',
+    checkout_abandonment_30m: 'Checkout abandonment',
+    shipping_notifications: 'Shipping notifications',
+    back_in_stock: 'Back in stock',
+    price_drop: 'Price drop',
+    win_back_7d: 'Win-back',
+    post_purchase_followup: 'Post-purchase follow-up',
+  };
+
+  return {
+    kpis: {
+      totalRevenueCents,
+      totalImpressions,
+      totalClicks,
+      avgCtrPercent: totalImpressions > 0 ? (totalClicks / totalImpressions) * 100 : 0,
+      newSubscribers: Number(subscriberRows[0]?.count ?? 0),
+    },
+    dailyRevenue: dailyRevenueRows.map((r) => ({
+      date: String(r.date),
+      revenueCents: Number(r.revenue_cents ?? 0),
+    })),
+    topCampaigns: topCampaignRows.map((r) => ({
+      id: String(r.id),
+      title: String(r.title ?? 'Untitled'),
+      impressions: Number(r.delivery_count ?? 0),
+      clicks: Number(r.click_count ?? 0),
+      revenueCents: Number(r.revenue_cents ?? 0),
+    })),
+    topAutomations: topAutoRows.map((r) => ({
+      ruleKey: String(r.rule_key),
+      name: ruleKeyLabels[String(r.rule_key)] ?? String(r.rule_key),
+      impressions: Number(r.impressions ?? 0),
+      clicks: clicksByRule.get(String(r.rule_key)) ?? 0,
+      revenueCents: Number(r.revenue_cents ?? 0),
+    })),
+    attribution: {
+      campaignRevenueCents,
+      automationRevenueCents: autoRevenueCents,
+    },
+  };
+};
+
 export const listDueScheduledCampaigns = async (limit = 25, shardCount = 1, shardIndex = 0) => {
   await ensureSchema();
   const sql = getNeonSql();
@@ -3378,7 +5600,7 @@ export const sendCampaign = async (
       }
 
       const chunk = recipients.slice(i, i + chunkSize);
-      const messages = chunk.map((item) => {
+      const chunkWithPayload = chunk.map((item) => {
         const platform = String((item as { platform?: string }).platform ?? '').toLowerCase();
         const platformImage =
           platform === 'windows'
@@ -3407,8 +5629,28 @@ export const sendCampaign = async (
         const secondButtonUrl = actionButtons[1]?.link
           ? buildTrackedUrl(String(actionButtons[1].link), campaignId, shopDomain, item.external_id, 'button_2')
           : null;
+        const primaryTrackUrl = buildCampaignClickTrackingUrl(trackedUrl, campaignId, shopDomain, item.external_id);
+        const button1TrackUrl = buildCampaignClickTrackingUrl(firstButtonUrl, campaignId, shopDomain, item.external_id);
+        const button2TrackUrl = buildCampaignClickTrackingUrl(secondButtonUrl, campaignId, shopDomain, item.external_id);
 
         return {
+          item,
+          platformImage,
+          trackedUrl,
+          firstButtonUrl,
+          secondButtonUrl,
+          primaryTrackUrl,
+          button1TrackUrl,
+          button2TrackUrl,
+          actions,
+        };
+      });
+
+      const fcmRecipients = chunkWithPayload.filter(({ item }) => String((item as { token_type?: string | null }).token_type ?? 'fcm') !== 'vapid');
+      const vapidRecipients = chunkWithPayload.filter(({ item }) => String((item as { token_type?: string | null }).token_type ?? 'fcm') === 'vapid');
+
+      if (fcmRecipients.length > 0) {
+        const messages = fcmRecipients.map(({ item, platformImage, trackedUrl, firstButtonUrl, secondButtonUrl, primaryTrackUrl, button1TrackUrl, button2TrackUrl, actions }) => ({
           token: item.fcm_token,
           notification: {
             title: campaign.title,
@@ -3431,45 +5673,109 @@ export const sendCampaign = async (
             primaryUrl: trackedUrl ?? '',
             button1Url: firstButtonUrl ?? '',
             button2Url: secondButtonUrl ?? '',
+            trackPrimaryUrl: primaryTrackUrl,
+            trackButton1Url: button1TrackUrl,
+            trackButton2Url: button2TrackUrl,
+            action1Title: actions[0]?.title ?? '',
+            action2Title: actions[1]?.title ?? '',
           },
-        };
-      });
+        }));
 
-      const multicast = await messaging.sendEach(messages);
+        const multicast = await messaging.sendEach(messages);
 
-      successCount += multicast.successCount;
-      failureCount += multicast.failureCount;
-  processedRecipients += chunk.length;
-  processedBatches += 1;
+        successCount += multicast.successCount;
+        failureCount += multicast.failureCount;
 
-      for (let index = 0; index < multicast.responses.length; index += 1) {
-        const response = multicast.responses[index];
-        const recipient = chunk[index];
+        for (let index = 0; index < multicast.responses.length; index += 1) {
+          const response = multicast.responses[index];
+          const recipient = fcmRecipients[index]?.item;
+          if (!recipient) {
+            continue;
+          }
 
-        if (response.success) {
+          if (response.success) {
+            await sql`
+              INSERT INTO campaign_deliveries (campaign_id, shop_domain, subscriber_id, token_id, fcm_message_id)
+              VALUES (
+                ${campaignId},
+                ${shopDomain},
+                ${Number(recipient.subscriber_id)},
+                ${Number(recipient.token_id)},
+                ${response.messageId ?? null}
+              )
+              ON CONFLICT (campaign_id, token_id) DO NOTHING
+            `;
+            continue;
+          }
+
+          const code = response.error?.code ?? '';
+          if (code.includes('registration-token-not-registered') || code.includes('invalid-registration-token')) {
+            await sql`
+              UPDATE subscriber_tokens
+              SET status = 'revoked', updated_at = NOW()
+              WHERE id = ${Number(recipient.token_id)}
+            `;
+          }
+        }
+      }
+
+      for (const { item, platformImage, trackedUrl, firstButtonUrl, secondButtonUrl, actions, primaryTrackUrl, button1TrackUrl, button2TrackUrl } of vapidRecipients) {
+        try {
+          const endpoint = String((item as { vapid_endpoint?: string | null }).vapid_endpoint ?? '');
+          const p256dh = String((item as { vapid_p256dh?: string | null }).vapid_p256dh ?? '');
+          const auth = String((item as { vapid_auth?: string | null }).vapid_auth ?? '');
+
+          if (!endpoint || !p256dh || !auth) {
+            failureCount += 1;
+            continue;
+          }
+
+          const vapidMessageId = await sendVapidPushNotification(
+            { endpoint, keys: { p256dh, auth } },
+            {
+              title: campaign.title,
+              body: campaign.body,
+              icon: campaign.icon_url,
+              image: platformImage,
+              url: trackedUrl,
+              actions,
+              button1Url: firstButtonUrl,
+              button2Url: secondButtonUrl,
+              trackPrimaryUrl: primaryTrackUrl,
+              trackButton1Url: button1TrackUrl,
+              trackButton2Url: button2TrackUrl,
+            },
+          );
+
+          successCount += 1;
+
           await sql`
             INSERT INTO campaign_deliveries (campaign_id, shop_domain, subscriber_id, token_id, fcm_message_id)
             VALUES (
               ${campaignId},
               ${shopDomain},
-              ${Number(recipient.subscriber_id)},
-              ${Number(recipient.token_id)},
-              ${response.messageId ?? null}
+              ${Number(item.subscriber_id)},
+              ${Number(item.token_id)},
+              ${vapidMessageId}
             )
             ON CONFLICT (campaign_id, token_id) DO NOTHING
           `;
-          continue;
-        }
+        } catch (error) {
+          failureCount += 1;
 
-        const code = response.error?.code ?? '';
-        if (code.includes('registration-token-not-registered') || code.includes('invalid-registration-token')) {
-          await sql`
-            UPDATE subscriber_tokens
-            SET status = 'revoked', updated_at = NOW()
-            WHERE id = ${Number(recipient.token_id)}
-          `;
+          const message = error instanceof Error ? error.message : String(error ?? '');
+          if (message.includes('410') || message.includes('404') || message.toLowerCase().includes('unsub')) {
+            await sql`
+              UPDATE subscriber_tokens
+              SET status = 'revoked', updated_at = NOW()
+              WHERE id = ${Number(item.token_id)}
+            `;
+          }
         }
       }
+
+      processedRecipients += chunk.length;
+      processedBatches += 1;
     }
 
     const remainingRecipients = Math.max(recipients.length - processedRecipients, 0);
@@ -3536,21 +5842,34 @@ export const cleanupMerchantData = async (shopDomain: string) => {
   `;
 };
 
-export const createMediaAsset = async (shopDomain: string, contentType: string, dataBase64: string) => {
+export const createMediaAsset = async (input: {
+  shopDomain: string;
+  contentType: string;
+  dataBase64?: string | null;
+  objectKey?: string | null;
+  publicUrl?: string | null;
+}) => {
   await ensureSchema();
   const sql = getNeonSql();
-  await ensureMerchant(shopDomain);
+  await ensureMerchant(input.shopDomain);
 
   const assetId = randomUUID();
 
   await sql`
-    INSERT INTO media_assets (id, shop_domain, content_type, data_base64)
-    VALUES (${assetId}, ${shopDomain}, ${contentType}, ${dataBase64})
+    INSERT INTO media_assets (id, shop_domain, content_type, data_base64, object_key, public_url)
+    VALUES (
+      ${assetId},
+      ${input.shopDomain},
+      ${input.contentType},
+      ${input.dataBase64 ?? null},
+      ${input.objectKey ?? null},
+      ${input.publicUrl ?? null}
+    )
   `;
 
   return {
     id: assetId,
-    url: `${env.NEXT_PUBLIC_APP_URL.replace(/\/$/, '')}/api/media/${assetId}`,
+    url: input.publicUrl?.trim() || `${env.NEXT_PUBLIC_APP_URL.replace(/\/$/, '')}/api/media/${assetId}`,
   };
 };
 
@@ -3559,7 +5878,7 @@ export const getMediaAsset = async (assetId: string) => {
   const sql = getNeonSql();
 
   const rows = await sql`
-    SELECT id, shop_domain, content_type, data_base64, created_at
+    SELECT id, shop_domain, content_type, data_base64, object_key, public_url, created_at
     FROM media_assets
     WHERE id = ${assetId}
     LIMIT 1
@@ -3570,7 +5889,9 @@ export const getMediaAsset = async (assetId: string) => {
         id: string;
         shop_domain: string;
         content_type: string;
-        data_base64: string;
+        data_base64: string | null;
+        object_key: string | null;
+        public_url: string | null;
         created_at: string | Date;
       }
     | null;
@@ -3681,6 +6002,14 @@ export const updateOptInSettings = async (input: UpdateOptInSettingsInput) => {
   const sql = getNeonSql();
   await ensureMerchant(input.shopDomain);
 
+  const existingRows = await sql`
+    SELECT opt_in_logo_url
+    FROM merchant_settings
+    WHERE shop_domain = ${input.shopDomain}
+    LIMIT 1
+  `;
+  const previousLogoUrl = existingRows[0]?.opt_in_logo_url ? String(existingRows[0].opt_in_logo_url) : null;
+
   await sql`
     INSERT INTO merchant_settings (
       shop_domain,
@@ -3755,6 +6084,10 @@ export const updateOptInSettings = async (input: UpdateOptInSettingsInput) => {
       updated_at = NOW()
   `;
 
+  if (previousLogoUrl && previousLogoUrl !== (input.logoUrl ?? null)) {
+    await cleanupUnusedMediaAssets(input.shopDomain, [previousLogoUrl]);
+  }
+
   return {
     promptType: input.promptType,
     title: input.title,
@@ -3802,6 +6135,495 @@ export const updateAttributionSettings = async (input: UpdateAttributionSettings
   `;
 
   return getAttributionSettings(input.shopDomain);
+};
+
+export const getPrivacySettings = async (shopDomain: string): Promise<PrivacySettings> => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  await ensureMerchant(shopDomain);
+
+  await sql`
+    INSERT INTO merchant_settings (shop_domain)
+    VALUES (${shopDomain})
+    ON CONFLICT (shop_domain) DO NOTHING
+  `;
+
+  const rows = await sql`
+    SELECT
+      support_tools_enabled,
+      ip_address_option,
+      geo_location_enabled,
+      notification_preferences_enabled,
+      email_store_option,
+      location_store_option,
+      name_store_option
+    FROM merchant_settings
+    WHERE shop_domain = ${shopDomain}
+    LIMIT 1
+  `;
+
+  const row = rows[0];
+
+  return {
+    allowSupport: row?.support_tools_enabled === undefined ? defaultPrivacySettings.allowSupport : Boolean(row.support_tools_enabled),
+    ipAddressOption: (row?.ip_address_option as PrivacySettings['ipAddressOption']) ?? defaultPrivacySettings.ipAddressOption,
+    enableGeo: row?.geo_location_enabled === undefined ? defaultPrivacySettings.enableGeo : Boolean(row.geo_location_enabled),
+    enablePreferences:
+      row?.notification_preferences_enabled === undefined
+        ? defaultPrivacySettings.enablePreferences
+        : Boolean(row.notification_preferences_enabled),
+    emailStoreOption: (row?.email_store_option as PrivacySettings['emailStoreOption']) ?? defaultPrivacySettings.emailStoreOption,
+    locationStoreOption: (row?.location_store_option as PrivacySettings['locationStoreOption']) ?? defaultPrivacySettings.locationStoreOption,
+    nameStoreOption: (row?.name_store_option as PrivacySettings['nameStoreOption']) ?? defaultPrivacySettings.nameStoreOption,
+  };
+};
+
+export const updatePrivacySettings = async (input: UpdatePrivacySettingsInput): Promise<PrivacySettings> => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  await ensureMerchant(input.shopDomain);
+
+  await sql`
+    INSERT INTO merchant_settings (
+      shop_domain,
+      support_tools_enabled,
+      ip_address_option,
+      geo_location_enabled,
+      notification_preferences_enabled,
+      email_store_option,
+      location_store_option,
+      name_store_option,
+      updated_at
+    )
+    VALUES (
+      ${input.shopDomain},
+      ${input.allowSupport},
+      ${input.ipAddressOption},
+      ${input.enableGeo},
+      ${input.enablePreferences},
+      ${input.emailStoreOption},
+      ${input.locationStoreOption},
+      ${input.nameStoreOption},
+      NOW()
+    )
+    ON CONFLICT (shop_domain)
+    DO UPDATE SET
+      support_tools_enabled = EXCLUDED.support_tools_enabled,
+      ip_address_option = EXCLUDED.ip_address_option,
+      geo_location_enabled = EXCLUDED.geo_location_enabled,
+      notification_preferences_enabled = EXCLUDED.notification_preferences_enabled,
+      email_store_option = EXCLUDED.email_store_option,
+      location_store_option = EXCLUDED.location_store_option,
+      name_store_option = EXCLUDED.name_store_option,
+      updated_at = NOW()
+  `;
+
+  return {
+    allowSupport: Boolean(input.allowSupport),
+    ipAddressOption: input.ipAddressOption,
+    enableGeo: Boolean(input.enableGeo),
+    enablePreferences: Boolean(input.enablePreferences),
+    emailStoreOption: input.emailStoreOption,
+    locationStoreOption: input.locationStoreOption,
+    nameStoreOption: input.nameStoreOption,
+  };
+};
+
+export const getBrandingSettings = async (shopDomain: string): Promise<BrandingSettings> => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  await ensureMerchant(shopDomain);
+
+  await sql`
+    INSERT INTO merchant_settings (shop_domain)
+    VALUES (${shopDomain})
+    ON CONFLICT (shop_domain) DO NOTHING
+  `;
+
+  const rows = await sql`
+    SELECT brand_logo_url
+    FROM merchant_settings
+    WHERE shop_domain = ${shopDomain}
+    LIMIT 1
+  `;
+
+  return {
+    logoUrl: rows[0]?.brand_logo_url ? String(rows[0].brand_logo_url) : null,
+  };
+};
+
+export const updateBrandingSettings = async (input: UpdateBrandingSettingsInput): Promise<BrandingSettings> => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  await ensureMerchant(input.shopDomain);
+
+  const existingRows = await sql`
+    SELECT brand_logo_url
+    FROM merchant_settings
+    WHERE shop_domain = ${input.shopDomain}
+    LIMIT 1
+  `;
+  const previousLogoUrl = existingRows[0]?.brand_logo_url ? String(existingRows[0].brand_logo_url) : null;
+
+  await sql`
+    INSERT INTO merchant_settings (shop_domain, brand_logo_url, updated_at)
+    VALUES (${input.shopDomain}, ${input.logoUrl ?? null}, NOW())
+    ON CONFLICT (shop_domain)
+    DO UPDATE SET
+      brand_logo_url = EXCLUDED.brand_logo_url,
+      updated_at = NOW()
+  `;
+
+  if (previousLogoUrl && previousLogoUrl !== (input.logoUrl ?? null)) {
+    await cleanupUnusedMediaAssets(input.shopDomain, [previousLogoUrl]);
+  }
+
+  return {
+    logoUrl: input.logoUrl ?? null,
+  };
+};
+
+export const getWelcomeAutomationDiagnostics = async (shopDomain: string) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  const ruleRows = await sql`
+    SELECT config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+    LIMIT 1
+  `;
+
+  const merchantRows = await sql`
+    SELECT m.primary_domain, m.myshopify_domain, s.brand_logo_url, s.opt_in_logo_url
+    FROM merchants m
+    LEFT JOIN merchant_settings s ON s.shop_domain = m.shop_domain
+    WHERE m.shop_domain = ${shopDomain}
+    LIMIT 1
+  `;
+
+  const jobsByStepStatusRows = await sql`
+    SELECT
+      COALESCE(j.payload -> 'metadata' ->> 'stepKey', 'unknown') AS step_key,
+      j.status,
+      COUNT(*)::INT AS total,
+      COUNT(*) FILTER (WHERE j.status = 'pending' AND j.due_at <= NOW())::INT AS due_now,
+      MAX(j.updated_at) AS last_updated_at
+    FROM automation_jobs j
+    WHERE j.shop_domain = ${shopDomain}
+      AND j.rule_key = 'welcome_subscriber'
+      AND COALESCE(j.payload -> 'metadata' ->> 'stepKey', '') IN ('reminder-1', 'reminder-2', 'reminder-3')
+    GROUP BY step_key, j.status
+    ORDER BY step_key ASC, j.status ASC
+  `;
+
+  const deliveryRows = await sql`
+    SELECT
+      COALESCE(j.payload -> 'metadata' ->> 'stepKey', 'unknown') AS step_key,
+      COUNT(*)::INT AS delivered,
+      MAX(d.delivered_at) AS last_delivered_at
+    FROM automation_deliveries d
+    JOIN automation_jobs j ON j.id = d.automation_job_id
+    WHERE d.shop_domain = ${shopDomain}
+      AND d.rule_key = 'welcome_subscriber'
+      AND COALESCE(j.payload -> 'metadata' ->> 'stepKey', '') IN ('reminder-1', 'reminder-2', 'reminder-3')
+    GROUP BY step_key
+    ORDER BY step_key ASC
+  `;
+
+  const staleProcessingRows = await sql`
+    SELECT COUNT(*)::INT AS stale_processing
+    FROM automation_jobs
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+      AND status = 'processing'
+      AND updated_at < NOW() - INTERVAL '10 minutes'
+      AND COALESCE(payload -> 'metadata' ->> 'stepKey', '') IN ('reminder-2', 'reminder-3')
+  `;
+
+  const recentRows = await sql`
+    SELECT
+      j.id,
+      COALESCE(j.payload -> 'metadata' ->> 'stepKey', 'unknown') AS step_key,
+      j.status,
+      j.attempts,
+      j.due_at,
+      j.sent_at,
+      j.updated_at,
+      j.error_message,
+      j.payload -> 'metadata' -> 'actionButtons' AS action_buttons,
+      j.token_id,
+      j.subscriber_id,
+      j.payload ->> 'externalId' AS external_id,
+      t.status AS token_status,
+      t.last_seen_at,
+      s.browser AS subscriber_browser,
+      s.platform AS subscriber_platform
+    FROM automation_jobs j
+    LEFT JOIN subscriber_tokens t ON t.id = j.token_id
+    LEFT JOIN subscribers s ON s.id = j.subscriber_id
+    WHERE j.shop_domain = ${shopDomain}
+      AND j.rule_key = 'welcome_subscriber'
+      AND COALESCE(j.payload -> 'metadata' ->> 'stepKey', '') IN ('reminder-2', 'reminder-3')
+    ORDER BY j.created_at DESC
+    LIMIT 40
+  `;
+
+  const summary = {
+    reminder2: {
+      pending: 0,
+      dueNow: 0,
+      sent: 0,
+      failed: 0,
+      skipped: 0,
+      processing: 0,
+      delivered: 0,
+      lastDeliveredAt: null as string | null,
+    },
+    reminder3: {
+      pending: 0,
+      dueNow: 0,
+      sent: 0,
+      failed: 0,
+      skipped: 0,
+      processing: 0,
+      delivered: 0,
+      lastDeliveredAt: null as string | null,
+    },
+    staleProcessing: Number(staleProcessingRows[0]?.stale_processing ?? 0),
+  };
+
+  for (const row of jobsByStepStatusRows as Array<{ step_key: string; status: string; total: number; due_now: number }>) {
+    const stepKey = String(row.step_key);
+    const bucket = stepKey === 'reminder-2' ? summary.reminder2 : stepKey === 'reminder-3' ? summary.reminder3 : null;
+    if (!bucket) {
+      continue;
+    }
+
+    const status = String(row.status);
+    const total = Number(row.total ?? 0);
+    if (status === 'pending') {
+      bucket.pending += total;
+      bucket.dueNow += Number(row.due_now ?? 0);
+    } else if (status === 'sent') {
+      bucket.sent += total;
+    } else if (status === 'failed') {
+      bucket.failed += total;
+    } else if (status === 'skipped') {
+      bucket.skipped += total;
+    } else if (status === 'processing') {
+      bucket.processing += total;
+    }
+  }
+
+  for (const row of deliveryRows as Array<{ step_key: string; delivered: number; last_delivered_at: string | null }>) {
+    const stepKey = String(row.step_key);
+    const bucket = stepKey === 'reminder-2' ? summary.reminder2 : stepKey === 'reminder-3' ? summary.reminder3 : null;
+    if (!bucket) {
+      continue;
+    }
+
+    bucket.delivered = Number(row.delivered ?? 0);
+    bucket.lastDeliveredAt = row.last_delivered_at ? new Date(row.last_delivered_at).toISOString() : null;
+  }
+
+  const inferredIssues: string[] = [];
+  if (summary.reminder2.dueNow > 0 || summary.reminder3.dueNow > 0) {
+    inferredIssues.push('Due delayed welcome jobs exist; cron/processing path should pick them immediately.');
+  }
+  if (summary.reminder2.failed > 0 || summary.reminder3.failed > 0) {
+    inferredIssues.push('Some delayed jobs are failed; review recent error_message values and token_status.');
+  }
+  if (summary.staleProcessing > 0) {
+    inferredIssues.push('Stale processing jobs detected (>10m); worker interruption/backpressure likely occurred.');
+  }
+  if (summary.reminder2.sent === 0 && summary.reminder2.pending === 0 && summary.reminder2.failed === 0) {
+    inferredIssues.push('No reminder-2 jobs found; welcome step enqueue path may not be creating delayed jobs.');
+  }
+  if (summary.reminder3.sent === 0 && summary.reminder3.pending === 0 && summary.reminder3.failed === 0) {
+    inferredIssues.push('No reminder-3 jobs found; welcome step enqueue path may not be creating delayed jobs.');
+  }
+
+  const welcomeConfig = parseWelcomeRuleConfig(ruleRows[0]?.config ?? null);
+  const storeBase = toAbsoluteStorefrontUrl(
+    merchantRows[0]?.primary_domain ?? merchantRows[0]?.myshopify_domain ?? shopDomain,
+    shopDomain,
+  );
+
+  const mediaStatus = (value: string | null | undefined) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) {
+      return {
+        present: false,
+        raw: null,
+        scheme: 'none',
+        normalized: null,
+      };
+    }
+
+    const normalized = toHttpUrlOrNull(raw, storeBase);
+    const scheme = raw.startsWith('https://')
+      ? 'https'
+      : raw.startsWith('http://')
+        ? 'http'
+        : raw.startsWith('data:')
+          ? 'data'
+          : raw.startsWith('blob:')
+            ? 'blob'
+            : 'relative-or-invalid';
+
+    return {
+      present: true,
+      raw,
+      scheme,
+      normalized,
+    };
+  };
+
+  const reminderMedia = {
+    'reminder-1': {
+      icon: mediaStatus(welcomeConfig.steps['reminder-1'].iconUrl ?? null),
+      image: mediaStatus(welcomeConfig.steps['reminder-1'].imageUrl ?? null),
+      windowsImage: mediaStatus(welcomeConfig.steps['reminder-1'].windowsImageUrl ?? null),
+      macosImage: mediaStatus(welcomeConfig.steps['reminder-1'].macosImageUrl ?? null),
+      androidImage: mediaStatus(welcomeConfig.steps['reminder-1'].androidImageUrl ?? null),
+    },
+    'reminder-2': {
+      icon: mediaStatus(welcomeConfig.steps['reminder-2'].iconUrl ?? null),
+      image: mediaStatus(welcomeConfig.steps['reminder-2'].imageUrl ?? null),
+      windowsImage: mediaStatus(welcomeConfig.steps['reminder-2'].windowsImageUrl ?? null),
+      macosImage: mediaStatus(welcomeConfig.steps['reminder-2'].macosImageUrl ?? null),
+      androidImage: mediaStatus(welcomeConfig.steps['reminder-2'].androidImageUrl ?? null),
+    },
+    'reminder-3': {
+      icon: mediaStatus(welcomeConfig.steps['reminder-3'].iconUrl ?? null),
+      image: mediaStatus(welcomeConfig.steps['reminder-3'].imageUrl ?? null),
+      windowsImage: mediaStatus(welcomeConfig.steps['reminder-3'].windowsImageUrl ?? null),
+      macosImage: mediaStatus(welcomeConfig.steps['reminder-3'].macosImageUrl ?? null),
+      androidImage: mediaStatus(welcomeConfig.steps['reminder-3'].androidImageUrl ?? null),
+    },
+  };
+
+  const invalidMediaIssues: string[] = [];
+  for (const stepKey of ['reminder-1', 'reminder-2', 'reminder-3'] as const) {
+    const stepMedia = reminderMedia[stepKey];
+    const entries = [
+      ['icon', stepMedia.icon],
+      ['image', stepMedia.image],
+      ['windowsImage', stepMedia.windowsImage],
+      ['macosImage', stepMedia.macosImage],
+      ['androidImage', stepMedia.androidImage],
+    ] as const;
+
+    for (const [field, item] of entries) {
+      if (item.present && !item.normalized) {
+        invalidMediaIssues.push(`${stepKey}.${field} uses unsupported URL scheme '${item.scheme}' and will be stripped before send.`);
+      }
+    }
+  }
+
+  inferredIssues.push(...invalidMediaIssues);
+
+  const stepConfig = {
+    'reminder-2': {
+      enabled: Boolean(welcomeConfig.steps['reminder-2'].enabled),
+      targetUrl: welcomeConfig.steps['reminder-2'].targetUrl ?? null,
+      actionButtons: welcomeConfig.steps['reminder-2'].actionButtons ?? [],
+    },
+    'reminder-3': {
+      enabled: Boolean(welcomeConfig.steps['reminder-3'].enabled),
+      targetUrl: welcomeConfig.steps['reminder-3'].targetUrl ?? null,
+      actionButtons: welcomeConfig.steps['reminder-3'].actionButtons ?? [],
+    },
+  };
+
+  for (const stepKey of ['reminder-2', 'reminder-3'] as const) {
+    const buttons = stepConfig[stepKey].actionButtons;
+    if (buttons.length > 2) {
+      inferredIssues.push(`${stepKey} has more than 2 action buttons configured; only the first 2 can be rendered.`);
+    }
+    if (buttons.some((button) => !String(button.title ?? '').trim() || !String(button.link ?? '').trim())) {
+      inferredIssues.push(`${stepKey} has action buttons with missing title/link; incomplete buttons will be dropped before send.`);
+    }
+  }
+
+  const recentErrorsByStep = {
+    'reminder-2': (recentRows as Array<Record<string, unknown>>)
+      .filter((row) => String(row.step_key ?? '') === 'reminder-2' && row.error_message)
+      .slice(0, 5)
+      .map((row) => String(row.error_message)),
+    'reminder-3': (recentRows as Array<Record<string, unknown>>)
+      .filter((row) => String(row.step_key ?? '') === 'reminder-3' && row.error_message)
+      .slice(0, 5)
+      .map((row) => String(row.error_message)),
+  };
+
+  return {
+    shopDomain,
+    checkedAt: new Date().toISOString(),
+    summary,
+    stepConfig,
+    recentErrorsByStep,
+    reminderMedia,
+    inferredIssues,
+    recentJobs: (recentRows as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id ?? ''),
+      stepKey: String(row.step_key ?? ''),
+      status: String(row.status ?? ''),
+      attempts: Number(row.attempts ?? 0),
+      dueAt: row.due_at ? new Date(String(row.due_at)).toISOString() : null,
+      sentAt: row.sent_at ? new Date(String(row.sent_at)).toISOString() : null,
+      updatedAt: row.updated_at ? new Date(String(row.updated_at)).toISOString() : null,
+      errorMessage: row.error_message ? String(row.error_message) : null,
+      actionButtons: Array.isArray(row.action_buttons)
+        ? (row.action_buttons as Array<Record<string, unknown>>).map((button) => ({
+            title: String(button.title ?? ''),
+            link: String(button.link ?? ''),
+          }))
+        : [],
+      tokenId: row.token_id == null ? null : Number(row.token_id),
+      subscriberId: row.subscriber_id == null ? null : Number(row.subscriber_id),
+      externalId: row.external_id ? String(row.external_id) : null,
+      tokenStatus: row.token_status ? String(row.token_status) : null,
+      tokenLastSeenAt: row.last_seen_at ? new Date(String(row.last_seen_at)).toISOString() : null,
+      browser: row.subscriber_browser ? String(row.subscriber_browser) : null,
+      platform: row.subscriber_platform ? String(row.subscriber_platform) : null,
+    })),
+  };
+};
+
+export const clearWelcomeAutomationHistory = async (shopDomain: string) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  const deliveryRows = await sql`
+    DELETE FROM automation_deliveries
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+    RETURNING id
+  `;
+
+  const clickRows = await sql`
+    DELETE FROM automation_clicks
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+    RETURNING id
+  `;
+
+  const jobRows = await sql`
+    DELETE FROM automation_jobs
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+    RETURNING id
+  `;
+
+  return {
+    clearedJobs: jobRows.length,
+    clearedDeliveries: deliveryRows.length,
+    clearedClicks: clickRows.length,
+    clearedAt: new Date().toISOString(),
+  };
 };
 
 export const trackCampaignClick = async (input: TrackCampaignClickInput) => {

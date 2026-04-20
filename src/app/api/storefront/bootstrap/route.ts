@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 
 import { env } from '@/lib/config/env';
 import { verifyShopifyAppProxySignature } from '@/lib/integrations/shopify/verify';
-import { getMerchantCapabilitySnapshot, getOptInSettings } from '@/lib/server/data/store';
+import { getMerchantCapabilitySnapshot, getOptInSettings, processDueAutomationJobsForShop } from '@/lib/server/data/store';
 import { parseShopDomain } from '@/lib/server/shop-context';
 import { getAnonymousExternalId, getCustomerExternalId } from '@/lib/server/storefront-identity';
 
@@ -37,6 +37,9 @@ export async function OPTIONS(request: Request) {
 
 export async function GET(request: Request) {
   const origin = request.headers.get('origin');
+  const requestUrl = new URL(request.url);
+  const directAppOrigin = requestUrl.origin.replace(/\/$/, '');
+  const proxyBasePath = '/apps/push-eagle';
 
   try {
     const url = new URL(request.url);
@@ -58,6 +61,8 @@ export async function GET(request: Request) {
     const optIn = await getOptInSettings(shopDomain);
   const shopifyCapabilities = await getMerchantCapabilitySnapshot(shopDomain);
 
+    void processDueAutomationJobsForShop(shopDomain, 20, 5).catch(() => undefined);
+
     const existingCookieId = cookieStore.get(cookieName)?.value ?? null;
     const externalId = customerExternalId ?? existingCookieId ?? getAnonymousExternalId();
 
@@ -66,9 +71,12 @@ export async function GET(request: Request) {
       shopDomain,
       externalId,
       tokenEndpoint: '/apps/push-eagle/token',
-      conversionEndpoint: `${env.NEXT_PUBLIC_APP_URL}/api/storefront/conversion`,
-      activityEndpoint: `${env.NEXT_PUBLIC_APP_URL}/api/storefront/activity`,
-      iosHomeScreenEndpoint: `${env.NEXT_PUBLIC_APP_URL}/api/storefront/ios-home-screen`,
+      conversionEndpoint: `${proxyBasePath}/conversion`,
+      conversionFallbackEndpoint: `${directAppOrigin}/api/storefront/conversion`,
+      activityEndpoint: `${proxyBasePath}/activity`,
+      activityFallbackEndpoint: `${directAppOrigin}/api/storefront/activity`,
+      iosHomeScreenEndpoint: `${proxyBasePath}/ios-home-screen`,
+      iosHomeScreenFallbackEndpoint: `${directAppOrigin}/api/storefront/ios-home-screen`,
       optIn,
       shopifyCapabilities,
       firebase: {
@@ -81,6 +89,7 @@ export async function GET(request: Request) {
         measurementId: env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
         vapidKey: env.NEXT_PUBLIC_FIREBASE_VAPID_KEY,
       },
+      webPushVapidPublicKey: env.VAPID_PUBLIC_KEY,
     });
 
     response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');

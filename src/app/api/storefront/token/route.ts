@@ -14,13 +14,17 @@ export const runtime = 'nodejs';
 const schema = z.object({
   shopDomain: z.string(),
   token: z.string().min(10),
-  externalId: z.string().optional(),
-  browser: z.string().optional(),
-  platform: z.string().optional(),
-  locale: z.string().optional(),
-  country: z.string().optional(),
-  city: z.string().optional(),
-  deviceContext: z.object({}).passthrough().optional(),
+  tokenType: z.enum(['fcm', 'vapid']).optional(),
+  vapidEndpoint: z.string().url().optional().nullable(),
+  vapidP256dh: z.string().optional().nullable(),
+  vapidAuth: z.string().optional().nullable(),
+  externalId: z.string().optional().nullable(),
+  browser: z.string().optional().nullable(),
+  platform: z.string().optional().nullable(),
+  locale: z.string().optional().nullable(),
+  country: z.string().optional().nullable(),
+  city: z.string().optional().nullable(),
+  deviceContext: z.object({}).passthrough().optional().nullable(),
 });
 
 const appOrigin = (() => {
@@ -56,8 +60,25 @@ const buildCorsHeaders = (origin: string | null) => ({
   'Access-Control-Allow-Origin': origin || appOrigin || '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, X-Shop-Domain',
+  'Access-Control-Allow-Credentials': 'true',
   Vary: 'Origin',
 });
+
+const getCorsOrigin = (origin: string | null) => {
+  if (!origin) {
+    return appOrigin || '*';
+  }
+
+  if (appOrigin && origin === appOrigin) {
+    return origin;
+  }
+
+  if (/^https:\/\/[a-z0-9.-]+$/i.test(origin)) {
+    return origin;
+  }
+
+  return appOrigin || '*';
+};
 
 const detectBrowserFromUserAgent = (userAgent: string | null) => {
   const ua = String(userAgent || '').toLowerCase();
@@ -83,15 +104,16 @@ const detectPlatformFromUserAgent = (userAgent: string | null) => {
   return 'unknown';
 };
 
-export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: buildCorsHeaders(null) });
+export async function OPTIONS(request: Request) {
+  const origin = request.headers.get('origin');
+  return new NextResponse(null, { status: 204, headers: buildCorsHeaders(getCorsOrigin(origin)) });
 }
 
 export async function POST(request: Request) {
   try {
     const origin = request.headers.get('origin');
     if (!isTrustedRequest(request)) {
-      return NextResponse.json({ ok: false, error: 'Unauthorized token registration request.' }, { status: 401, headers: buildCorsHeaders(origin) });
+      return NextResponse.json({ ok: false, error: 'Unauthorized token registration request.' }, { status: 401, headers: buildCorsHeaders(getCorsOrigin(origin)) });
     }
 
     const url = new URL(request.url);
@@ -101,7 +123,7 @@ export async function POST(request: Request) {
     if (url.searchParams.has('shop')) {
       const proxiedShopDomain = parseShopDomain(url.searchParams.get('shop'));
       if (proxiedShopDomain !== shopDomain) {
-        return NextResponse.json({ ok: false, error: 'Shop domain mismatch.' }, { status: 400, headers: buildCorsHeaders(origin) });
+        return NextResponse.json({ ok: false, error: 'Shop domain mismatch.' }, { status: 400, headers: buildCorsHeaders(getCorsOrigin(origin)) });
       }
     }
 
@@ -132,6 +154,10 @@ export async function POST(request: Request) {
       shopDomain,
       externalId,
       token: body.token,
+      tokenType: body.tokenType,
+      vapidEndpoint: body.vapidEndpoint,
+      vapidP256dh: body.vapidP256dh,
+      vapidAuth: body.vapidAuth,
       browser,
       platform,
       locale,
@@ -148,11 +174,11 @@ export async function POST(request: Request) {
         subscriberId: saved.subscriberId,
         tokenId: saved.tokenId,
       },
-      { headers: buildCorsHeaders(origin) },
+      { headers: buildCorsHeaders(getCorsOrigin(origin)) },
     );
   } catch (error) {
     const origin = request.headers.get('origin');
     const message = error instanceof Error ? error.message : 'Failed to register storefront token.';
-    return NextResponse.json({ ok: false, error: message }, { status: 400, headers: buildCorsHeaders(origin) });
+    return NextResponse.json({ ok: false, error: message }, { status: 400, headers: buildCorsHeaders(getCorsOrigin(origin)) });
   }
 }

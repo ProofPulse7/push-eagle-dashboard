@@ -27,7 +27,7 @@ const updateSchema = z.object({
     'win_back_7d',
     'post_purchase_followup',
   ]),
-  enabled: z.boolean(),
+  enabled: z.boolean().optional(),
   config: z.record(z.any()).optional(),
 });
 
@@ -35,7 +35,14 @@ export async function GET(request: Request) {
   try {
     const shopDomain = extractShopDomain(request);
     const rules = await listAutomationRules(shopDomain);
-    return NextResponse.json({ ok: true, rules });
+    return NextResponse.json(
+      { ok: true, rules },
+      {
+        headers: {
+          'Cache-Control': 'private, max-age=10, stale-while-revalidate=30',
+        },
+      },
+    );
   } catch (error) {
     const message = getRequestErrorMessage(error, 'Failed to load automation rules.');
     return NextResponse.json({ ok: false, error: message }, { status: 400 });

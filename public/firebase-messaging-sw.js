@@ -19,17 +19,47 @@ firebase.initializeApp(firebaseConfig);
 // messages.
 const messaging = firebase.messaging();
 
+const buildPushEagleActions = (payload) => {
+  const notificationActions = Array.isArray(payload.notification?.actions)
+    ? payload.notification.actions
+    : [];
+
+  if (notificationActions.length > 0) {
+    return notificationActions.slice(0, 2).filter((a) => a && a.action && a.title);
+  }
+
+  const data = payload.data || {};
+  const fallbackActions = [];
+  if (data.action1Title && data.button1Url) {
+    fallbackActions.push({ action: 'btn_1', title: String(data.action1Title) });
+  }
+  if (data.action2Title && data.button2Url) {
+    fallbackActions.push({ action: 'btn_2', title: String(data.action2Title) });
+  }
+  return fallbackActions;
+};
+
 messaging.onBackgroundMessage(function(payload) {
   console.log('Received background message ', payload);
   // Customize notification here
   const notificationTitle = payload.notification?.title || 'Push Eagle';
+
+  const actions = buildPushEagleActions(payload);
+
+  const url = payload.fcmOptions?.link || payload.data?.url || '/';
+  const button1Url = payload.data?.button1Url || url;
+  const button2Url = payload.data?.button2Url || '';
+
   const notificationOptions = {
     body: payload.notification?.body,
     icon: payload.notification?.icon,
     image: payload.notification?.image,
+    actions: actions.length > 0 ? actions : undefined,
     data: {
-      url: payload.fcmOptions?.link || payload.data?.url || '/'
-    }
+      url,
+      button1Url,
+      button2Url,
+    },
   };
 
   self.registration.showNotification(notificationTitle, notificationOptions);
@@ -38,6 +68,15 @@ messaging.onBackgroundMessage(function(payload) {
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
 
-  const targetUrl = event.notification?.data?.url || '/';
+  const data = event.notification?.data || {};
+  let targetUrl;
+  if (event.action === 'btn_1') {
+    targetUrl = data.button1Url || data.url || '/';
+  } else if (event.action === 'btn_2') {
+    targetUrl = data.button2Url || data.url || '/';
+  } else {
+    targetUrl = data.url || '/';
+  }
+
   event.waitUntil(clients.openWindow(targetUrl));
 });

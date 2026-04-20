@@ -17,7 +17,20 @@ import { ScrollArea } from '../ui/scroll-area';
 import { AutomationComposerActions } from './automation-composer-actions';
 import { Check, Loader2 } from 'lucide-react';
 
-export function AutomationComposer() {
+const fileToDataUrl = (file: File) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read image file.'));
+    reader.readAsDataURL(file);
+});
+
+export function AutomationComposer({
+    automationPath = '/automations/welcome-notifications',
+    automationRuleKey = 'welcome_subscriber',
+}: {
+    automationPath?: string;
+    automationRuleKey?: 'welcome_subscriber' | 'cart_abandonment_30m' | 'browse_abandonment_15m' | 'shipping_notifications' | 'back_in_stock' | 'price_drop';
+}) {
     const { 
         title, setTitle, 
         message, setMessage, 
@@ -40,15 +53,18 @@ export function AutomationComposer() {
 
     const handleEditedImageSave = (dataUrl: string, type: string) => {
         if (type === 'windows') {
-            setWindowsHero({ file: null, preview: dataUrl });
+            setWindowsHero({ ...windowsHero, file: null, preview: dataUrl, originalPreview: windowsHero.originalPreview ?? windowsHero.preview });
+            setShowWindowsWarning(false);
             return;
         }
         if (type === 'mac') {
-            setMacHero({ file: null, preview: dataUrl });
+            setMacHero({ ...macHero, file: null, preview: dataUrl, originalPreview: macHero.originalPreview ?? macHero.preview });
+            setShowMacWarning(false);
             return;
         }
         if (type === 'android') {
-            setAndroidHero({ file: null, preview: dataUrl });
+            setAndroidHero({ ...androidHero, file: null, preview: dataUrl, originalPreview: androidHero.originalPreview ?? androidHero.preview });
+            setShowAndroidWarning(false);
             return;
         }
         if (type === 'logo') {
@@ -82,20 +98,20 @@ export function AutomationComposer() {
         reader.readAsDataURL(file);
     };
 
-    const handleImageUpload = (file: File | undefined, imageType: 'windows' | 'mac' | 'android' | 'logo') => {
+    const handleImageUpload = async (file: File | undefined, imageType: 'windows' | 'mac' | 'android' | 'logo') => {
         if (!file) return;
 
-        const isFirstHeroUpload = !windowsHero.file && !macHero.file && !androidHero.file && imageType !== 'logo';
-        const previewUrl = URL.createObjectURL(file);
+        const isFirstHeroUpload = !windowsHero.preview && !macHero.preview && !androidHero.preview && imageType !== 'logo';
+        const previewUrl = await fileToDataUrl(file);
 
         if (imageType === 'logo') {
             setLogo({ file, preview: previewUrl });
         } else {
-            const newImageValue = { file, preview: previewUrl };
+            const newImageValue = { file, preview: previewUrl, originalPreview: previewUrl };
             if (isFirstHeroUpload) {
-                setWindowsHero(newImageValue);
-                setMacHero(newImageValue);
-                setAndroidHero(newImageValue);
+                setWindowsHero({ ...newImageValue });
+                setMacHero({ ...newImageValue });
+                setAndroidHero({ ...newImageValue });
                 checkImageDimensions(file, 'windows');
                 checkImageDimensions(file, 'mac');
                 checkImageDimensions(file, 'android');
@@ -131,7 +147,9 @@ export function AutomationComposer() {
       message,
       primaryLink,
       logo,
+            windowsHero,
       macHero,
+            androidHero,
       actionButtons
     });
 
@@ -193,7 +211,8 @@ export function AutomationComposer() {
                     <AutomationComposerActions 
                         setSaveStatus={setSaveStatus}
                         getAutomationData={getAutomationData}
-                        automationPath="/automations/welcome-notifications"
+                        automationPath={automationPath}
+                        automationRuleKey={automationRuleKey}
                     />
                 </div>
             </div>

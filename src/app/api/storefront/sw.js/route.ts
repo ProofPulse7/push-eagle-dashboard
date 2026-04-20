@@ -21,14 +21,64 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
+function sendTrackingBeacon(trackUrl) {
+  if (!trackUrl) {
+    return Promise.resolve();
+  }
+
+  return fetch(trackUrl, {
+    method: 'GET',
+    mode: 'no-cors',
+    credentials: 'omit',
+    cache: 'no-store',
+    keepalive: true,
+  }).catch(function() {
+    // Ignore tracking failures so click-through always works.
+  });
+}
+
+function buildPushEagleActions(payload) {
+  const notificationActions = Array.isArray(payload.notification?.actions)
+    ? payload.notification.actions
+    : [];
+
+  if (notificationActions.length > 0) {
+    return notificationActions.slice(0, 2).filter(function(action) {
+      return action && action.action && action.title;
+    });
+  }
+
+  const data = payload.data || {};
+  const fallbackActions = [];
+  if (data.action1Title && data.button1Url) {
+    fallbackActions.push({ action: 'btn_1', title: String(data.action1Title) });
+  }
+  if (data.action2Title && data.button2Url) {
+    fallbackActions.push({ action: 'btn_2', title: String(data.action2Title) });
+  }
+  return fallbackActions;
+}
+
 messaging.onBackgroundMessage(function(payload) {
   const title = payload.notification?.title || 'Push Eagle';
+  const url = payload.fcmOptions?.link || payload.data?.url || '/';
+  const button1Url = payload.data?.button1Url || url;
+  const button2Url = payload.data?.button2Url || '';
+  const trackPrimaryUrl = payload.data?.trackPrimaryUrl || '';
+  const trackButton1Url = payload.data?.trackButton1Url || '';
+  const trackButton2Url = payload.data?.trackButton2Url || '';
   const options = {
     body: payload.notification?.body,
     icon: payload.notification?.icon,
     image: payload.notification?.image,
+    actions: buildPushEagleActions(payload),
     data: {
-      url: payload.fcmOptions?.link || payload.data?.url || '/'
+      url,
+      button1Url,
+      button2Url,
+      trackPrimaryUrl,
+      trackButton1Url,
+      trackButton2Url
     }
   };
 
@@ -38,8 +88,52 @@ messaging.onBackgroundMessage(function(payload) {
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
 
-  const target = event.notification?.data?.url || '/';
-  event.waitUntil(clients.openWindow(target));
+  const data = event.notification?.data || {};
+  let target = data.url || '/';
+  let trackUrl = data.trackPrimaryUrl || '';
+  if (event.action === 'btn_1') {
+    target = data.button1Url || data.url || '/';
+    trackUrl = data.trackButton1Url || data.trackPrimaryUrl || '';
+  } else if (event.action === 'btn_2') {
+    target = data.button2Url || data.url || '/';
+    trackUrl = data.trackButton2Url || data.trackPrimaryUrl || '';
+  }
+
+  event.waitUntil(Promise.all([sendTrackingBeacon(trackUrl), clients.openWindow(target)]));
+});
+
+// Fallback for VAPID/browser-native push payloads (Firefox/Safari).
+self.addEventListener('push', function(event) {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch (_error) {
+    payload = {};
+  }
+
+  const title = payload.title || payload.notification?.title || 'Push Eagle';
+  const url = payload.url || payload.data?.url || '/';
+  const button1Url = payload.data?.button1Url || url;
+  const button2Url = payload.data?.button2Url || '';
+  const trackPrimaryUrl = payload.data?.trackPrimaryUrl || '';
+  const trackButton1Url = payload.data?.trackButton1Url || '';
+  const trackButton2Url = payload.data?.trackButton2Url || '';
+  const options = {
+    body: payload.body || payload.notification?.body,
+    icon: payload.icon || payload.notification?.icon,
+    image: payload.image || payload.notification?.image,
+    actions: buildPushEagleActions(payload),
+    data: {
+      url,
+      button1Url,
+      button2Url,
+      trackPrimaryUrl,
+      trackButton1Url,
+      trackButton2Url
+    }
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 `;
 

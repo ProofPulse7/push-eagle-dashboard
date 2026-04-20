@@ -2,7 +2,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import {
     ArchiveRestore,
@@ -13,6 +12,7 @@ import {
     ShoppingCart,
     Tag,
     Truck,
+    Zap,
     type LucideIcon,
 } from 'lucide-react';
 
@@ -146,15 +146,21 @@ const getActionButtonClassName = (enabled: boolean) =>
         : 'h-8 rounded-lg bg-violet-600 px-3 text-xs font-semibold text-white hover:bg-violet-600/90';
 
 export default function AutomationsPage() {
-    const searchParams = useSearchParams();
     const { shopDomain: storedShopDomain } = useSettings();
     const [rules, setRules] = useState<AutomationRule[]>([]);
     const [stats, setStats] = useState<AutomationStats | null>(null);
     const [loading, setLoading] = useState(true);
     const [savingRuleKey, setSavingRuleKey] = useState<RuleKey | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const activeShopDomain = (searchParams.get('shop') || storedShopDomain || '').trim().toLowerCase();
-    const currentQuery = searchParams.toString();
+    const [queryShop, setQueryShop] = useState('');
+    const [currentQuery, setCurrentQuery] = useState('');
+    const activeShopDomain = (queryShop || storedShopDomain || '').trim().toLowerCase();
+
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        setQueryShop(params.get('shop') || '');
+        setCurrentQuery(params.toString());
+    }, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -276,6 +282,12 @@ export default function AutomationsPage() {
                         <h1 className="text-3xl font-semibold tracking-tight text-slate-950">Automations</h1>
                         <p className="mt-1 text-sm text-slate-500">Set up automated workflows to engage your audience.</p>
                     </div>
+                    <Link href={`/automations/diagnostic${typeof window !== 'undefined' && window.location.search ? window.location.search : ''}`}>
+                        <Button variant="outline" size="sm" className="gap-2">
+                            <Zap className="w-4 h-4" />
+                            Diagnostics
+                        </Button>
+                    </Link>
                 </div>
 
                 <section className="space-y-3">

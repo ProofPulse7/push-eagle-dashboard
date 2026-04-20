@@ -1,15 +1,19 @@
 'use client';
-import React, { createContext, useState, useContext, ReactNode, useEffect, useCallback } from 'react';
+import React, { createContext, useState, useContext, ReactNode, useEffect, useCallback, useRef } from 'react';
 import { useSettings } from '@/context/settings-context';
 
 type ActionButton = { title: string; link: string };
-type ImageValue = { file: File | null; preview: string | null };
+type ImageValue = { file: File | null; preview: string | null; originalPreview?: string | null };
 type AutomationInitialState = {
     notification?: {
         title?: string;
         message?: string;
+        targetUrl?: string | null;
         iconUrl?: string | null;
         heroUrl?: string | null;
+        windowsHeroUrl?: string | null;
+        macHeroUrl?: string | null;
+        androidHeroUrl?: string | null;
         actionButtons?: ActionButton[];
     };
 };
@@ -37,6 +41,24 @@ export interface AutomationContextType {
 
 export const AutomationContext = createContext<AutomationContextType | undefined>(undefined);
 
+const normalizeTrackedLink = (value: string | null | undefined) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) {
+        return '';
+    }
+
+    try {
+        const parsed = new URL(raw);
+        if (parsed.pathname === '/api/track/automation-click' || parsed.pathname === '/api/track/click') {
+            return parsed.searchParams.get('u') || raw;
+        }
+    } catch {
+        return raw;
+    }
+
+    return raw;
+};
+
 export function useAutomationState() {
     const context = useContext(AutomationContext);
     if (!context) {
@@ -46,31 +68,43 @@ export function useAutomationState() {
 }
 
 export function AutomationStateProvider({ children }: { children: ReactNode }) {
+    const blobUrlsRef = useRef<Set<string>>(new Set());
     const [isInitialized, setIsInitialized] = useState(false);
     const [title, setTitle] = useState('');
     const [message, setMessage] = useState('');
-    const [primaryLink, setPrimaryLink] = useState('https://example.com');
+    const [primaryLink, setPrimaryLink] = useState('');
     const [actionButtons, setActionButtons] = useState<ActionButton[]>([]);
-    const [windowsHero, setWindowsHero] = useState<ImageValue>({ file: null, preview: null });
-    const [macHero, setMacHero] = useState<ImageValue>({ file: null, preview: null });
-    const [androidHero, setAndroidHero] = useState<ImageValue>({ file: null, preview: null });
-    const { logo, setLogo } = useSettings();
+    const [windowsHero, setWindowsHero] = useState<ImageValue>({ file: null, preview: null, originalPreview: null });
+    const [macHero, setMacHero] = useState<ImageValue>({ file: null, preview: null, originalPreview: null });
+    const [androidHero, setAndroidHero] = useState<ImageValue>({ file: null, preview: null, originalPreview: null });
+    const { storeUrl, shopDomain, logo, setLogo } = useSettings();
+
+    const fallbackStoreUrl = storeUrl || (shopDomain ? `https://${shopDomain}` : '');
 
     const initializeState = useCallback((initialState: AutomationInitialState) => {
         if (initialState?.notification) {
             setTitle(initialState.notification.title || '');
             setMessage(initialState.notification.message || '');
-            if (!logo.preview) {
-                setLogo({ file: null, preview: initialState.notification.iconUrl || null });
+            setPrimaryLink(normalizeTrackedLink(initialState.notification.targetUrl) || fallbackStoreUrl);
+            // Always restore the step-specific icon if one was saved; fall back to settings logo only if absent
+            const stepIcon = initialState.notification.iconUrl || null;
+            if (stepIcon || !logo.preview) {
+                setLogo({ file: null, preview: stepIcon || logo.preview || null });
             }
-            const heroUrl = initialState.notification.heroUrl || null;
-            setWindowsHero({ file: null, preview: heroUrl });
-            setMacHero({ file: null, preview: heroUrl });
-            setAndroidHero({ file: null, preview: heroUrl });
-            setActionButtons(initialState.notification.actionButtons || []);
+            const fallbackHeroUrl = initialState.notification.heroUrl || null;
+            const windowsHeroUrl = initialState.notification.windowsHeroUrl || fallbackHeroUrl;
+            const macHeroUrl = initialState.notification.macHeroUrl || fallbackHeroUrl;
+            const androidHeroUrl = initialState.notification.androidHeroUrl || fallbackHeroUrl;
+            setWindowsHero({ file: null, preview: windowsHeroUrl, originalPreview: windowsHeroUrl });
+            setMacHero({ file: null, preview: macHeroUrl, originalPreview: macHeroUrl });
+            setAndroidHero({ file: null, preview: androidHeroUrl, originalPreview: androidHeroUrl });
+            setActionButtons((initialState.notification.actionButtons || []).map((button) => ({
+                ...button,
+                link: normalizeTrackedLink(button.link),
+            })));
             setIsInitialized(true);
         }
-    }, [logo.preview, setLogo]);
+    }, [logo.preview, setLogo, fallbackStoreUrl]);
 
     const value: AutomationContextType = {
         isInitialized,
@@ -86,13 +120,29 @@ export function AutomationStateProvider({ children }: { children: ReactNode }) {
     };
 
     useEffect(() => {
-        const allPreviews = [windowsHero.preview, macHero.preview, androidHero.preview, logo.preview];
+        const candidates = [
+            windowsHero.preview,
+            windowsHero.originalPreview,
+            macHero.preview,
+            macHero.originalPreview,
+            androidHero.preview,
+            androidHero.originalPreview,
+            logo.preview,
+        ];
+
+        candidates.forEach((url) => {
+            if (url && url.startsWith('blob:')) {
+                blobUrlsRef.current.add(url);
+            }
+        });
+    }, [windowsHero.preview, windowsHero.originalPreview, macHero.preview, macHero.originalPreview, androidHero.preview, androidHero.originalPreview, logo.preview]);
+
+    useEffect(() => {
         return () => {
-            allPreviews.forEach(p => {
-                if (p && p.startsWith('blob:')) URL.revokeObjectURL(p);
-            });
+            blobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+            blobUrlsRef.current.clear();
         };
-    }, [windowsHero.preview, macHero.preview, androidHero.preview, logo.preview]);
+    }, []);
 
     return (
         <AutomationContext.Provider value={value}>

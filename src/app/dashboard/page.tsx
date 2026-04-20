@@ -10,34 +10,74 @@ import { RecentActivity } from '@/components/dashboard/recent-activity';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { formatCurrency } from '@/lib/utils';
 import { Separator } from '@/components/ui/separator';
+import { getCampaignStats, getSubscriberKpis, getMerchantOverview } from '@/lib/server/data/store';
 
-async function getDashboardData() {
-  // Mock data since Firebase is removed
-  const stats = {
-    revenueGenerated: 562341.50,
-    revenueChange: '+15.2%',
-    totalCampaignsSent: 128,
-    campaignsChange: '+12 this month',
-    totalSubscribers: 1257301,
-    impressionsConsumed: 2450300,
-    impressionsLimit: 5000000,
-  };
-  
-  const activeCampaigns = {
-    total: 5,
-    running: 3,
-    scheduled: 2,
-  };
+async function getDashboardData(shopDomain?: string | null) {
+  if (!shopDomain) {
+    return {
+      stats: {
+        revenueGenerated: 0,
+        revenueChange: 'No data yet',
+        totalCampaignsSent: 0,
+        campaignsChange: 'No data yet',
+        totalSubscribers: 0,
+        impressionsConsumed: 0,
+        impressionsLimit: 5000000,
+      },
+      error: null,
+    };
+  }
 
-  return {
-    stats,
-    activeCampaigns,
-    error: null
-  };
+  try {
+    const [campaignStats, subscriberKpis, merchantOverview] = await Promise.all([
+      getCampaignStats(shopDomain),
+      getSubscriberKpis(shopDomain),
+      getMerchantOverview(shopDomain),
+    ]);
+
+    const revenueChange =
+      campaignStats.revenueCents > 0
+        ? `${campaignStats.revenueCents > 0 ? '+' : ''}${formatCurrency(campaignStats.revenueCents / 100)} this period`
+        : 'No revenue yet';
+
+    const subscriberChange =
+      subscriberKpis.growthPercent !== 0
+        ? `${subscriberKpis.growthPercent > 0 ? '+' : ''}${subscriberKpis.growthPercent.toFixed(1)}% vs last 7 days`
+        : '+0% vs last 7 days';
+
+    return {
+      stats: {
+        revenueGenerated: campaignStats.revenueCents / 100,
+        revenueChange,
+        totalCampaignsSent: merchantOverview.campaignCount,
+        campaignsChange: `${subscriberKpis.newSubscribersLast7Days} new subscribers (7d)`,
+        totalSubscribers: subscriberKpis.totalSubscribers,
+        impressionsConsumed: campaignStats.impressions,
+        impressionsLimit: 5000000,
+        subscriberChange,
+      },
+      error: null,
+    };
+  } catch (err) {
+    return {
+      stats: {
+        revenueGenerated: 0,
+        revenueChange: 'Unable to load',
+        totalCampaignsSent: 0,
+        campaignsChange: 'Unable to load',
+        totalSubscribers: 0,
+        impressionsConsumed: 0,
+        impressionsLimit: 5000000,
+      },
+      error: err instanceof Error ? err.message : 'Failed to load dashboard data.',
+    };
+  }
 }
 
-export default async function DashboardPage() {
-  const { stats, activeCampaigns, error } = await getDashboardData();
+export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ shop?: string }> }) {
+  const params = await searchParams;
+  const shopDomain = params.shop?.trim().toLowerCase() || null;
+  const { stats, error } = await getDashboardData(shopDomain);
 
   if (error) {
     return (
@@ -91,7 +131,7 @@ export default async function DashboardPage() {
                 {formatCurrency(stats.revenueGenerated)}
             </div>
             <p className="text-xs text-muted-foreground">
-              {stats.revenueChange} from last month
+              {stats.revenueChange}
             </p>
           </CardContent>
         </Card>
@@ -115,7 +155,7 @@ export default async function DashboardPage() {
           <CardContent>
             <div className="text-2xl font-bold">{stats.totalSubscribers.toLocaleString()}</div>
             <p className="text-xs text-muted-foreground">
-              +2.5% from last month
+               {(stats as any)?.subscriberChange || ''}
             </p>
           </CardContent>
         </Card>
@@ -126,12 +166,12 @@ export default async function DashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="text-xl font-bold">
-                {stats.impressionsConsumed.toLocaleString()}
+                {(stats?.impressionsConsumed ?? 0).toLocaleString()}
                 <span className="text-muted-foreground"> / </span>
-                <span className="text-muted-foreground">{stats.impressionsLimit.toLocaleString()}</span>
+               <span className="text-muted-foreground">{(stats?.impressionsLimit ?? 0).toLocaleString()}</span>
             </div>
             <p className="text-xs text-muted-foreground">
-              {(stats.impressionsLimit - stats.impressionsConsumed).toLocaleString()} impressions remaining
+               {((stats?.impressionsLimit ?? 0) - (stats?.impressionsConsumed ?? 0)).toLocaleString()} impressions remaining
             </p>
           </CardContent>
         </Card>
@@ -157,7 +197,7 @@ export default async function DashboardPage() {
                  <div className="space-y-2">
                     <Progress value={(stats.totalSubscribers / 4000000) * 100} aria-label="Plan usage" />
                     <div className="text-sm text-muted-foreground">
-                        <span className="font-semibold text-foreground">{stats.totalSubscribers.toLocaleString()} / 4,000,000</span> Subscribers
+                      <span className="font-semibold text-foreground">{(stats?.totalSubscribers ?? 0).toLocaleString()} / 4,000,000</span> Subscribers
                     </div>
                  </div>
                  <Separator/>

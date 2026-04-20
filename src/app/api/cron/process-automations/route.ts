@@ -4,14 +4,24 @@ import { env } from '@/lib/config/env';
 import { listDueAutomationJobs, processAutomationJob, pruneAutomationData } from '@/lib/server/data/store';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 const isAuthorized = (request: Request) => {
+  // Vercel cron can arrive with varying header formats depending on platform/runtime.
+  const vercelCronHeader = (request.headers.get('x-vercel-cron') ?? '').trim().toLowerCase();
+  const userAgent = (request.headers.get('user-agent') ?? '').toLowerCase();
+  if (vercelCronHeader === '1' || vercelCronHeader === 'true' || userAgent.includes('vercel-cron')) {
+    return true;
+  }
+
   if (!env.CRON_SECRET) {
     return false;
   }
 
-  return request.headers.get('authorization') === `Bearer ${env.CRON_SECRET}`;
+  const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+  const xSecret = request.headers.get('x-automation-secret') ?? '';
+  const querySecret = new URL(request.url).searchParams.get('secret') ?? '';
+  return bearer === env.CRON_SECRET || xSecret === env.CRON_SECRET || querySecret === env.CRON_SECRET;
 };
 
 const parsePositiveInt = (value: string | null, fallback: number, min: number, max: number) => {

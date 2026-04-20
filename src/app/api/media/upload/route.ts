@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { createMediaAsset } from '@/lib/server/data/store';
+import { createMediaAsset, pruneOrphanedMediaAssets } from '@/lib/server/data/store';
+import { uploadImageToR2 } from '@/lib/server/media/r2';
 import { extractShopDomain } from '@/lib/server/shop-context';
 
 export const runtime = 'nodejs';
@@ -27,6 +28,8 @@ const parseDataUrl = (dataUrl: string) => {
 
 export async function POST(request: Request) {
   try {
+    const requestUrl = new URL(request.url);
+    const origin = requestUrl.origin.replace(/\/$/, '');
     const body = schema.parse(await request.json());
     const shopDomain = extractShopDomain(request, body.shopDomain);
 
@@ -35,8 +38,28 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: 'Image too large. Max size is 2MB.' }, { status: 413 });
     }
 
-    const asset = await createMediaAsset(shopDomain, contentType, dataBase64);
-    return NextResponse.json({ ok: true, asset });
+    const bytes = Buffer.from(dataBase64, 'base64');
+    const uploaded = await uploadImageToR2({
+      shopDomain,
+      contentType,
+      bytes,
+    });
+    const asset = await createMediaAsset({
+      shopDomain,
+      contentType,
+      objectKey: uploaded.objectKey,
+      publicUrl: uploaded.publicUrl,
+    });
+
+    await pruneOrphanedMediaAssets(shopDomain, 60).catch(() => undefined);
+
+    return NextResponse.json({
+      ok: true,
+      asset: {
+        id: asset.id,
+        url: uploaded.publicUrl || `${origin}/api/media/${asset.id}`,
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to upload image asset.';
     return NextResponse.json({ ok: false, error: message }, { status: 400 });
