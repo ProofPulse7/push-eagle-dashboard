@@ -38,8 +38,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const [logo, setLogoState] = useState<ImageValue>({ file: null, preview: null });
     const [attributionModel, setAttributionModelState] = useState<'click' | 'impression'>('impression');
     const [attributionCreditMode, setAttributionCreditModeState] = useState<'last_touch' | 'all_touches'>('last_touch');
-    const [clickWindowDays, setClickWindowDaysState] = useState(2);
-    const [impressionWindowDays, setImpressionWindowDaysState] = useState(3);
+    const [clickWindowDays, setClickWindowDaysState] = useState(7);
+    const [impressionWindowDays, setImpressionWindowDaysState] = useState(7);
 
     useEffect(() => {
         // Load settings from localStorage when the component mounts on the client

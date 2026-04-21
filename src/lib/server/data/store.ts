@@ -602,8 +602,8 @@ const ensureSchema = async () => {
         shop_domain TEXT PRIMARY KEY REFERENCES merchants(shop_domain) ON DELETE CASCADE,
         attribution_model TEXT NOT NULL DEFAULT 'impression',
         attribution_credit_mode TEXT NOT NULL DEFAULT 'last_touch',
-        click_window_days INTEGER NOT NULL DEFAULT 2,
-        impression_window_days INTEGER NOT NULL DEFAULT 3,
+        click_window_days INTEGER NOT NULL DEFAULT 7,
+        impression_window_days INTEGER NOT NULL DEFAULT 7,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
 
@@ -6085,8 +6085,8 @@ export const getAttributionSettings = async (shopDomain: string) => {
   return {
     attributionModel: (settingsRows[0]?.attribution_model as 'click' | 'impression') ?? 'impression',
     attributionCreditMode: (settingsRows[0]?.attribution_credit_mode as 'last_touch' | 'all_touches') ?? 'last_touch',
-    clickWindowDays: Number(settingsRows[0]?.click_window_days ?? 2),
-    impressionWindowDays: Number(settingsRows[0]?.impression_window_days ?? 3),
+    clickWindowDays: Number(settingsRows[0]?.click_window_days ?? 7),
+    impressionWindowDays: Number(settingsRows[0]?.impression_window_days ?? 7),
   };
 };
 
