@@ -379,13 +379,34 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    if (endpointProbes.some((probe) => !probe.ok)) {
+    const resolvedProbe = resolvedTrackingBase
+      ? endpointProbes.find((probe) => probe.base === resolvedTrackingBase) ?? null
+      : null;
+    const failingProbes = endpointProbes.filter((probe) => !probe.ok);
+
+    if (resolvedTrackingBase && resolvedProbe && !resolvedProbe.ok) {
       issues.push({
         severity: 'warning',
         component: 'ClickTracking',
-        title: 'One or more tracking endpoint probes failed',
-        description: 'Diagnostics could not reach all configured tracking bases. Check domain/env alignment for tracking URLs.',
+        title: 'Resolved tracking endpoint probe failed',
+        description: 'Diagnostics could not reach the currently selected tracking base. Check tracking domain/env alignment.',
+        details: { resolvedTrackingBase, endpointProbes },
+      });
+    } else if (!resolvedTrackingBase && failingProbes.length > 0) {
+      issues.push({
+        severity: 'warning',
+        component: 'ClickTracking',
+        title: 'Tracking endpoint probes failed with no resolved base',
+        description: 'Diagnostics found failing tracking probes and could not determine a resolved tracking base.',
         details: { endpointProbes },
+      });
+    } else if (failingProbes.length > 0) {
+      issues.push({
+        severity: 'info',
+        component: 'ClickTracking',
+        title: 'Some non-active tracking bases are unreachable',
+        description: 'The resolved tracking base is healthy. Unreachable fallback or legacy bases are listed for cleanup visibility.',
+        details: { resolvedTrackingBase, endpointProbes },
       });
     }
 
