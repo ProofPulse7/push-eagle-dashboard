@@ -44,6 +44,7 @@ type UpsertTokenInput = {
 type UpdateAttributionSettingsInput = {
   shopDomain: string;
   attributionModel: 'click' | 'impression';
+  attributionCreditMode: 'last_touch' | 'all_touches';
   clickWindowDays: number;
   impressionWindowDays: number;
 };
@@ -600,10 +601,13 @@ const ensureSchema = async () => {
       await sql`CREATE TABLE IF NOT EXISTS merchant_settings (
         shop_domain TEXT PRIMARY KEY REFERENCES merchants(shop_domain) ON DELETE CASCADE,
         attribution_model TEXT NOT NULL DEFAULT 'impression',
+        attribution_credit_mode TEXT NOT NULL DEFAULT 'last_touch',
         click_window_days INTEGER NOT NULL DEFAULT 2,
         impression_window_days INTEGER NOT NULL DEFAULT 3,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`;
+
+      await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS attribution_credit_mode TEXT NOT NULL DEFAULT 'last_touch'`;
 
       await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS opt_in_prompt_type TEXT NOT NULL DEFAULT 'custom'`;
       await sql`ALTER TABLE merchant_settings ADD COLUMN IF NOT EXISTS opt_in_title TEXT`;
@@ -6072,7 +6076,7 @@ export const getAttributionSettings = async (shopDomain: string) => {
   `;
 
   const settingsRows = await sql`
-    SELECT attribution_model, click_window_days, impression_window_days
+    SELECT attribution_model, attribution_credit_mode, click_window_days, impression_window_days
     FROM merchant_settings
     WHERE shop_domain = ${shopDomain}
     LIMIT 1
@@ -6080,6 +6084,7 @@ export const getAttributionSettings = async (shopDomain: string) => {
 
   return {
     attributionModel: (settingsRows[0]?.attribution_model as 'click' | 'impression') ?? 'impression',
+    attributionCreditMode: (settingsRows[0]?.attribution_credit_mode as 'last_touch' | 'all_touches') ?? 'last_touch',
     clickWindowDays: Number(settingsRows[0]?.click_window_days ?? 2),
     impressionWindowDays: Number(settingsRows[0]?.impression_window_days ?? 3),
   };
@@ -6263,10 +6268,18 @@ export const updateAttributionSettings = async (input: UpdateAttributionSettings
   await ensureMerchant(input.shopDomain);
 
   await sql`
-    INSERT INTO merchant_settings (shop_domain, attribution_model, click_window_days, impression_window_days, updated_at)
+    INSERT INTO merchant_settings (
+      shop_domain,
+      attribution_model,
+      attribution_credit_mode,
+      click_window_days,
+      impression_window_days,
+      updated_at
+    )
     VALUES (
       ${input.shopDomain},
       ${input.attributionModel},
+      ${input.attributionCreditMode},
       ${input.clickWindowDays},
       ${input.impressionWindowDays},
       NOW()
@@ -6274,6 +6287,7 @@ export const updateAttributionSettings = async (input: UpdateAttributionSettings
     ON CONFLICT (shop_domain)
     DO UPDATE SET
       attribution_model = EXCLUDED.attribution_model,
+      attribution_credit_mode = EXCLUDED.attribution_credit_mode,
       click_window_days = EXCLUDED.click_window_days,
       impression_window_days = EXCLUDED.impression_window_days,
       updated_at = NOW()
@@ -6921,118 +6935,163 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     return { attributed: true, campaignId: null, model: settings.attributionModel };
   }
 
+  type CampaignTouch = {
+    id: number;
+    campaignId: string;
+    touchedAt: Date;
+  };
+  type AutomationTouch = {
+    id: number;
+    ruleKey: string;
+    touchedAt: Date;
+  };
+
+  const windowDays = settings.attributionModel === 'click'
+    ? Math.max(1, settings.clickWindowDays)
+    : Math.max(1, settings.impressionWindowDays);
+  const windowStart = new Date(occurredAt.getTime() - windowDays * 24 * 60 * 60 * 1000);
+
+  let campaignTouches: CampaignTouch[] = [];
+  let automationTouches: AutomationTouch[] = [];
+
   if (settings.attributionModel === 'click') {
-    const clickWindowHours = Math.max(1, settings.clickWindowDays) * 24;
-    const clickCandidates = externalIdCandidates.length > 0
-      ? await sql`
-        SELECT c.id, c.campaign_id
+    campaignTouches = externalIdCandidates.length > 0
+      ? (await sql`
+        SELECT c.id, c.campaign_id, c.clicked_at
         FROM campaign_clicks c
         JOIN subscribers s ON s.id = c.subscriber_id
         WHERE c.shop_domain = ${input.shopDomain}
           AND s.external_id = ANY(${externalIdCandidates})
-          AND c.clicked_at >= ${new Date(occurredAt.getTime() - clickWindowHours * 60 * 60 * 1000)}
+          AND c.clicked_at >= ${windowStart}
         ORDER BY c.clicked_at DESC
-        LIMIT 1
-      `
+      `).map((row) => ({
+        id: Number(row.id),
+        campaignId: String(row.campaign_id),
+        touchedAt: new Date(String(row.clicked_at)),
+      }))
       : [];
 
-    const matchedClick = clickCandidates[0];
-    const matchedCampaignId = (matchedClick?.campaign_id as string | undefined) ?? input.campaignId ?? null;
+    automationTouches = externalIdCandidates.length > 0
+      ? (await sql`
+        SELECT id, rule_key, clicked_at
+        FROM automation_clicks
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id = ANY(${externalIdCandidates})
+          AND clicked_at >= ${windowStart}
+        ORDER BY clicked_at DESC
+      `).map((row) => ({
+        id: Number(row.id),
+        ruleKey: String(row.rule_key),
+        touchedAt: new Date(String(row.clicked_at)),
+      }))
+      : [];
+  } else {
+    campaignTouches = externalIdCandidates.length > 0
+      ? (await sql`
+        SELECT d.id, d.campaign_id, d.delivered_at
+        FROM campaign_deliveries d
+        JOIN subscribers s ON s.id = d.subscriber_id
+        WHERE d.shop_domain = ${input.shopDomain}
+          AND s.external_id = ANY(${externalIdCandidates})
+          AND d.delivered_at >= ${windowStart}
+        ORDER BY d.delivered_at DESC
+      `).map((row) => ({
+        id: Number(row.id),
+        campaignId: String(row.campaign_id),
+        touchedAt: new Date(String(row.delivered_at)),
+      }))
+      : [];
 
-    if (!matchedCampaignId) {
-      return { attributed: false };
+    if (campaignTouches.length === 0 && input.campaignId) {
+      const fallbackRows = await sql`
+        SELECT d.id, d.campaign_id, d.delivered_at
+        FROM campaign_deliveries d
+        WHERE d.shop_domain = ${input.shopDomain}
+          AND d.campaign_id = ${input.campaignId}
+          AND d.delivered_at >= ${windowStart}
+        ORDER BY d.delivered_at DESC
+      `;
+      campaignTouches = fallbackRows.map((row) => ({
+        id: Number(row.id),
+        campaignId: String(row.campaign_id),
+        touchedAt: new Date(String(row.delivered_at)),
+      }));
     }
 
-    if (matchedClick?.id) {
+    automationTouches = externalIdCandidates.length > 0
+      ? (await sql`
+        SELECT id, rule_key, delivered_at
+        FROM automation_deliveries
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id = ANY(${externalIdCandidates})
+          AND delivered_at >= ${windowStart}
+        ORDER BY delivered_at DESC
+      `).map((row) => ({
+        id: Number(row.id),
+        ruleKey: String(row.rule_key),
+        touchedAt: new Date(String(row.delivered_at)),
+      }))
+      : [];
+  }
+
+  const campaignById = new Map<string, CampaignTouch>();
+  for (const touch of campaignTouches) {
+    if (!campaignById.has(touch.campaignId)) {
+      campaignById.set(touch.campaignId, touch);
+    }
+  }
+
+  const automationByRule = new Map<string, AutomationTouch>();
+  for (const touch of automationTouches) {
+    if (!automationByRule.has(touch.ruleKey)) {
+      automationByRule.set(touch.ruleKey, touch);
+    }
+  }
+
+  let selectedCampaignTouches = Array.from(campaignById.values());
+  let selectedAutomationTouches = Array.from(automationByRule.values());
+
+  if (settings.attributionCreditMode === 'last_touch') {
+    const lastCampaignTouch = selectedCampaignTouches[0] ?? null;
+    const lastAutomationTouch = selectedAutomationTouches[0] ?? null;
+
+    if (lastCampaignTouch && lastAutomationTouch) {
+      if (lastCampaignTouch.touchedAt >= lastAutomationTouch.touchedAt) {
+        selectedAutomationTouches = [];
+        selectedCampaignTouches = [lastCampaignTouch];
+      } else {
+        selectedCampaignTouches = [];
+        selectedAutomationTouches = [lastAutomationTouch];
+      }
+    } else if (lastCampaignTouch) {
+      selectedCampaignTouches = [lastCampaignTouch];
+      selectedAutomationTouches = [];
+    } else if (lastAutomationTouch) {
+      selectedCampaignTouches = [];
+      selectedAutomationTouches = [lastAutomationTouch];
+    }
+  }
+
+  if (selectedCampaignTouches.length === 0 && selectedAutomationTouches.length === 0) {
+    return { attributed: false };
+  }
+
+  const campaignTable = settings.attributionModel === 'click' ? 'campaign_clicks' : 'campaign_deliveries';
+  const automationTable = settings.attributionModel === 'click' ? 'automation_clicks' : 'automation_deliveries';
+
+  for (const touch of selectedCampaignTouches) {
+    if (campaignTable === 'campaign_clicks') {
       await sql`
         UPDATE campaign_clicks
         SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
-        WHERE id = ${Number(matchedClick.id)}
+        WHERE id = ${touch.id}
           AND order_id IS NULL
       `;
-    }
-
-    await sql`
-      UPDATE campaigns
-      SET revenue_cents = revenue_cents + ${input.revenueCents}
-      WHERE id = ${matchedCampaignId} AND shop_domain = ${input.shopDomain}
-    `;
-
-    return { attributed: true, campaignId: matchedCampaignId, model: 'click' as const };
-  }
-
-  const automationClickWindowHours = Math.max(1, settings.clickWindowDays) * 24;
-  const automationClickCandidates = externalIdCandidates.length > 0
-    ? await sql`
-      SELECT id, rule_key
-      FROM automation_clicks
-      WHERE shop_domain = ${input.shopDomain}
-        AND external_id = ANY(${externalIdCandidates})
-        AND clicked_at >= ${new Date(occurredAt.getTime() - automationClickWindowHours * 60 * 60 * 1000)}
-      ORDER BY clicked_at DESC
-      LIMIT 1
-    `
-    : [];
-
-  if (automationClickCandidates[0]?.id) {
-    await sql`
-      UPDATE automation_clicks
-      SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
-      WHERE id = ${Number(automationClickCandidates[0].id)}
-        AND order_id IS NULL
-    `;
-
-    return { attributed: true, campaignId: null, model: 'click' as const };
-  }
-
-  const impressionWindowHours = Math.max(1, settings.impressionWindowDays) * 24;
-  const deliveryCandidates = externalIdCandidates.length > 0
-    ? await sql`
-      SELECT d.id, d.campaign_id
-      FROM campaign_deliveries d
-      JOIN subscribers s ON s.id = d.subscriber_id
-      WHERE d.shop_domain = ${input.shopDomain}
-        AND s.external_id = ANY(${externalIdCandidates})
-        AND d.delivered_at >= ${new Date(occurredAt.getTime() - impressionWindowHours * 60 * 60 * 1000)}
-      ORDER BY d.delivered_at DESC
-      LIMIT 1
-    `
-    : [];
-
-  const matchedDelivery = deliveryCandidates[0];
-  const fallbackCampaignDelivery = !matchedDelivery && input.campaignId
-    ? await sql`
-      SELECT d.id, d.campaign_id
-      FROM campaign_deliveries d
-      WHERE d.shop_domain = ${input.shopDomain}
-        AND d.campaign_id = ${input.campaignId}
-        AND d.delivered_at >= ${new Date(occurredAt.getTime() - impressionWindowHours * 60 * 60 * 1000)}
-      ORDER BY d.delivered_at DESC
-      LIMIT 1
-    `
-    : [];
-
-  const matched = matchedDelivery ?? fallbackCampaignDelivery[0];
-  const matchedCampaignId = (matched?.campaign_id as string | undefined) ?? input.campaignId ?? null;
-
-  const automationDeliveryCandidates = externalIdCandidates.length > 0
-    ? await sql`
-      SELECT id, rule_key
-      FROM automation_deliveries
-      WHERE shop_domain = ${input.shopDomain}
-        AND external_id = ANY(${externalIdCandidates})
-        AND delivered_at >= ${new Date(occurredAt.getTime() - impressionWindowHours * 60 * 60 * 1000)}
-      ORDER BY delivered_at DESC
-      LIMIT 1
-    `
-    : [];
-
-  if (matchedCampaignId) {
-    if (matched?.id) {
+    } else {
       await sql`
         UPDATE campaign_deliveries
         SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
-        WHERE id = ${Number(matched.id)}
+        WHERE id = ${touch.id}
           AND order_id IS NULL
       `;
     }
@@ -7040,24 +7099,34 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     await sql`
       UPDATE campaigns
       SET revenue_cents = revenue_cents + ${input.revenueCents}
-      WHERE id = ${matchedCampaignId} AND shop_domain = ${input.shopDomain}
+      WHERE id = ${touch.campaignId}
+        AND shop_domain = ${input.shopDomain}
     `;
-
-    return { attributed: true, campaignId: matchedCampaignId, model: 'impression' as const };
   }
 
-  if (automationDeliveryCandidates[0]?.id) {
-    await sql`
-      UPDATE automation_deliveries
-      SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
-      WHERE id = ${Number(automationDeliveryCandidates[0].id)}
-        AND order_id IS NULL
-    `;
-
-    return { attributed: true, campaignId: null, model: 'impression' as const };
+  for (const touch of selectedAutomationTouches) {
+    if (automationTable === 'automation_clicks') {
+      await sql`
+        UPDATE automation_clicks
+        SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
+        WHERE id = ${touch.id}
+          AND order_id IS NULL
+      `;
+    } else {
+      await sql`
+        UPDATE automation_deliveries
+        SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
+        WHERE id = ${touch.id}
+          AND order_id IS NULL
+      `;
+    }
   }
 
-  return { attributed: false };
+  return {
+    attributed: true,
+    campaignId: selectedCampaignTouches[0]?.campaignId ?? null,
+    model: settings.attributionModel,
+  };
 };
 
 export const registerWebhookEvent = async (input: RegisterWebhookEventInput) => {
