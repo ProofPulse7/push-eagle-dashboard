@@ -995,7 +995,7 @@ const buildCampaignClickTrackingUrl = (
     return '';
   }
 
-  const trackingBase = env.NEXT_PUBLIC_APP_URL || env.SHOPIFY_ROOT_APP_URL || env.SHOPIFY_APP_URL;
+  const trackingBase = env.SHOPIFY_APP_URL || env.NEXT_PUBLIC_APP_URL || env.SHOPIFY_ROOT_APP_URL;
 
   try {
     const trackerBase = new URL('/api/track/click', trackingBase);
@@ -1065,7 +1065,7 @@ const buildAutomationClickTrackingUrl = (
     return '';
   }
 
-  const trackingBase = env.NEXT_PUBLIC_APP_URL || env.SHOPIFY_ROOT_APP_URL || env.SHOPIFY_APP_URL;
+  const trackingBase = env.SHOPIFY_APP_URL || env.NEXT_PUBLIC_APP_URL || env.SHOPIFY_ROOT_APP_URL;
 
   try {
     const trackerBase = new URL('/api/track/automation-click', trackingBase);

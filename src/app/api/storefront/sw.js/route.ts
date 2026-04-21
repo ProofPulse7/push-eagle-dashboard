@@ -19,7 +19,7 @@ firebase.initializeApp({
   measurementId: '${env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID}'
 });
 
-const messaging = firebase.messaging();
+firebase.messaging();
 
 function sendTrackingBeacon(trackUrl) {
   if (!trackUrl) {
@@ -59,32 +59,6 @@ function buildPushEagleActions(payload) {
   return fallbackActions;
 }
 
-messaging.onBackgroundMessage(function(payload) {
-  const title = payload.data?.title || payload.notification?.title || 'Push Eagle';
-  const url = payload.fcmOptions?.link || payload.data?.url || '/';
-  const button1Url = payload.data?.button1Url || url;
-  const button2Url = payload.data?.button2Url || '';
-  const trackPrimaryUrl = payload.data?.trackPrimaryUrl || '';
-  const trackButton1Url = payload.data?.trackButton1Url || '';
-  const trackButton2Url = payload.data?.trackButton2Url || '';
-  const options = {
-    body: payload.data?.body || payload.notification?.body,
-    icon: payload.data?.icon || payload.notification?.icon,
-    image: payload.data?.image || payload.notification?.image,
-    actions: buildPushEagleActions(payload),
-    data: {
-      url,
-      button1Url,
-      button2Url,
-      trackPrimaryUrl,
-      trackButton1Url,
-      trackButton2Url
-    }
-  };
-
-  self.registration.showNotification(title, options);
-});
-
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
 
@@ -103,7 +77,7 @@ self.addEventListener('notificationclick', function(event) {
   event.waitUntil(sendTrackingBeacon(trackUrl));
 });
 
-// Fallback for VAPID/browser-native push payloads (Firefox/Safari).
+// Unified renderer for both Firebase and VAPID payloads.
 self.addEventListener('push', function(event) {
   let payload = {};
   try {
@@ -112,23 +86,20 @@ self.addEventListener('push', function(event) {
     payload = {};
   }
 
-  // Firebase background payloads are rendered by messaging.onBackgroundMessage.
-  if (payload && (payload.from || payload.fcmMessageId)) {
-    return;
-  }
-
-  const title = payload.title || payload.notification?.title || 'Push Eagle';
-  const url = payload.url || payload.data?.url || '/';
+  const title = payload.data?.title || payload.title || payload.notification?.title || 'Push Eagle';
+  const url = payload.fcmOptions?.link || payload.url || payload.data?.url || '/';
   const button1Url = payload.data?.button1Url || url;
   const button2Url = payload.data?.button2Url || '';
   const trackPrimaryUrl = payload.data?.trackPrimaryUrl || '';
   const trackButton1Url = payload.data?.trackButton1Url || '';
   const trackButton2Url = payload.data?.trackButton2Url || '';
   const options = {
-    body: payload.body || payload.notification?.body,
-    icon: payload.icon || payload.notification?.icon,
-    image: payload.image || payload.notification?.image,
+    body: payload.data?.body || payload.body || payload.notification?.body,
+    icon: payload.data?.icon || payload.icon || payload.notification?.icon,
+    image: payload.data?.image || payload.image || payload.notification?.image,
     actions: buildPushEagleActions(payload),
+    tag: payload.data?.trackPrimaryUrl || payload.data?.url || payload.fcmMessageId || payload.messageId || title,
+    renotify: false,
     data: {
       url,
       button1Url,

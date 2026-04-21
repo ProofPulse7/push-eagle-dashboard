@@ -15,9 +15,8 @@ const firebaseConfig = {
 
 firebase.initializeApp(firebaseConfig);
 
-// Retrieve an instance of Firebase Messaging so that it can handle background
-// messages.
-const messaging = firebase.messaging();
+// Ensure Firebase messaging is initialized in this worker context.
+firebase.messaging();
 
 const sendTrackingBeacon = (trackUrl) => {
   if (!trackUrl) {
@@ -55,38 +54,6 @@ const buildPushEagleActions = (payload) => {
   return fallbackActions;
 };
 
-messaging.onBackgroundMessage(function(payload) {
-  console.log('Received background message ', payload);
-  // Customize notification here
-  const notificationTitle = payload.data?.title || payload.notification?.title || 'Push Eagle';
-
-  const actions = buildPushEagleActions(payload);
-
-  const url = payload.fcmOptions?.link || payload.data?.url || '/';
-  const button1Url = payload.data?.button1Url || url;
-  const button2Url = payload.data?.button2Url || '';
-  const trackPrimaryUrl = payload.data?.trackPrimaryUrl || '';
-  const trackButton1Url = payload.data?.trackButton1Url || '';
-  const trackButton2Url = payload.data?.trackButton2Url || '';
-
-  const notificationOptions = {
-    body: payload.data?.body || payload.notification?.body,
-    icon: payload.data?.icon || payload.notification?.icon,
-    image: payload.data?.image || payload.notification?.image,
-    actions: actions.length > 0 ? actions : undefined,
-    data: {
-      url,
-      button1Url,
-      button2Url,
-      trackPrimaryUrl,
-      trackButton1Url,
-      trackButton2Url,
-    },
-  };
-
-  self.registration.showNotification(notificationTitle, notificationOptions);
-});
-
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
 
@@ -108,7 +75,7 @@ self.addEventListener('notificationclick', function(event) {
   event.waitUntil(sendTrackingBeacon(trackUrl));
 });
 
-// Fallback for VAPID/native web push payloads only.
+// Unified renderer for both Firebase and VAPID/native web push payloads.
 self.addEventListener('push', function(event) {
   let payload = {};
   try {
@@ -117,13 +84,8 @@ self.addEventListener('push', function(event) {
     payload = {};
   }
 
-  // Firebase payloads are already handled by messaging.onBackgroundMessage.
-  if (payload && (payload.from || payload.fcmMessageId)) {
-    return;
-  }
-
-  const title = payload.title || payload.notification?.title || 'Push Eagle';
-  const url = payload.url || payload.data?.url || '/';
+  const title = payload.data?.title || payload.title || payload.notification?.title || 'Push Eagle';
+  const url = payload.fcmOptions?.link || payload.url || payload.data?.url || '/';
   const button1Url = payload.data?.button1Url || url;
   const button2Url = payload.data?.button2Url || '';
   const trackPrimaryUrl = payload.data?.trackPrimaryUrl || '';
@@ -131,10 +93,12 @@ self.addEventListener('push', function(event) {
   const trackButton2Url = payload.data?.trackButton2Url || '';
 
   const options = {
-    body: payload.body || payload.data?.body || payload.notification?.body,
-    icon: payload.icon || payload.data?.icon || payload.notification?.icon,
-    image: payload.image || payload.data?.image || payload.notification?.image,
+    body: payload.data?.body || payload.body || payload.notification?.body,
+    icon: payload.data?.icon || payload.icon || payload.notification?.icon,
+    image: payload.data?.image || payload.image || payload.notification?.image,
     actions: buildPushEagleActions(payload),
+    tag: payload.data?.trackPrimaryUrl || payload.data?.url || payload.fcmMessageId || payload.messageId || title,
+    renotify: false,
     data: {
       url,
       button1Url,
