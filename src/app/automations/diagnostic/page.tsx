@@ -67,6 +67,12 @@ interface DiagnosticResult {
     lastDeliveryClickAt: string | null;
     lastAutomationClickAt: string | null;
   };
+  clickTrackingDebug?: {
+    configuredBases: string[];
+    resolvedTrackingBase: string | null;
+    sampleTrackingUrls: Array<{ base: string; url: string }>;
+    endpointProbes: Array<{ base: string; ok: boolean; status: number | null; error: string | null }>;
+  };
   recentWelcomeDeliveries?: Array<{
     id: number;
     externalId: string | null;
@@ -338,6 +344,41 @@ function DiagnosticPageContent() {
               </CardContent>
             </Card>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Click tracking endpoint debug</CardTitle>
+              <CardDescription>Use this block to identify domain/base mismatches when clicks are not saved.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <div>Resolved tracking base: {diagnostic.clickTrackingDebug?.resolvedTrackingBase ?? 'none'}</div>
+              <div>Configured bases: {(diagnostic.clickTrackingDebug?.configuredBases ?? []).join(' | ') || 'none'}</div>
+              <div className="rounded border p-3">
+                <div className="mb-2 font-medium">Endpoint probes</div>
+                {(diagnostic.clickTrackingDebug?.endpointProbes ?? []).length === 0 ? (
+                  <div className="text-muted-foreground">No probes available.</div>
+                ) : (
+                  (diagnostic.clickTrackingDebug?.endpointProbes ?? []).map((probe) => (
+                    <div key={probe.base} className="break-all">
+                      base={probe.base} ok={probe.ok ? 'yes' : 'no'} status={probe.status ?? 'null'} error={probe.error ?? 'none'}
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="rounded border p-3">
+                <div className="mb-2 font-medium">Sample tracking URLs</div>
+                {(diagnostic.clickTrackingDebug?.sampleTrackingUrls ?? []).length === 0 ? (
+                  <div className="text-muted-foreground">No sample URLs generated.</div>
+                ) : (
+                  (diagnostic.clickTrackingDebug?.sampleTrackingUrls ?? []).map((item) => (
+                    <div key={item.base} className="break-all">
+                      {item.url}
+                    </div>
+                  ))
+                )}
+              </div>
+            </CardContent>
+          </Card>
 
           <div className="grid gap-6 xl:grid-cols-2">
             <Card>

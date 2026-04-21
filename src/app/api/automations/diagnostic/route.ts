@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+import { env } from '@/lib/config/env';
 import { getNeonSql } from '@/lib/integrations/database/neon';
 import { getWelcomeAutomationDiagnostics } from '@/lib/server/data/store';
 
@@ -39,6 +40,12 @@ type DiagnosticResult = {
     clicks7d: number;
     lastDeliveryClickAt: string | null;
     lastAutomationClickAt: string | null;
+  };
+  clickTrackingDebug?: {
+    configuredBases: string[];
+    resolvedTrackingBase: string | null;
+    sampleTrackingUrls: Array<{ base: string; url: string }>;
+    endpointProbes: Array<{ base: string; ok: boolean; status: number | null; error: string | null }>;
   };
   recentWelcomeDeliveries?: Array<{
     id: number;
@@ -156,6 +163,99 @@ export async function GET(request: NextRequest) {
       `,
     ]);
 
+    const rawBases = [
+      env.SHOPIFY_APP_URL,
+      env.NEXT_PUBLIC_APP_URL,
+      env.SHOPIFY_ROOT_APP_URL,
+      'https://push-eagle-dashboard.vercel.app',
+    ];
+
+    const configuredBases: string[] = [];
+    for (const raw of rawBases) {
+      const value = String(raw ?? '').trim();
+      if (!value) {
+        continue;
+      }
+      try {
+        const parsed = new URL(value);
+        if (!/^https?:$/i.test(parsed.protocol)) {
+          continue;
+        }
+        const normalized = parsed.toString().replace(/\/$/, '');
+        if (!configuredBases.includes(normalized)) {
+          configuredBases.push(normalized);
+        }
+        if (parsed.hostname === 'push-eagle.vercel.app') {
+          const dashboardVariant = `${parsed.protocol}//push-eagle-dashboard.vercel.app`;
+          if (!configuredBases.includes(dashboardVariant)) {
+            configuredBases.push(dashboardVariant);
+          }
+        }
+      } catch {
+        // Ignore malformed base URLs.
+      }
+    }
+
+    const resolvedTrackingBase = configuredBases.find((item) => {
+      try {
+        return new URL(item).hostname.includes('dashboard');
+      } catch {
+        return false;
+      }
+    })
+      || configuredBases.find((item) => {
+        try {
+          return new URL(item).hostname !== 'localhost';
+        } catch {
+          return false;
+        }
+      })
+      || configuredBases[0]
+      || null;
+
+    const sampleRecentDelivery = (recentDeliveryRows as Array<Record<string, unknown>>)[0] ?? null;
+    const sampleTarget = sampleRecentDelivery?.target_url ? String(sampleRecentDelivery.target_url) : `https://${shopDomain}/`;
+    const sampleExternal = sampleRecentDelivery?.external_id ? String(sampleRecentDelivery.external_id) : 'diagnostic_probe';
+
+    const sampleTrackingUrls = configuredBases.slice(0, 4).map((base) => {
+      const tracker = new URL('/api/track/automation-click', base);
+      tracker.searchParams.set('r', 'welcome_subscriber');
+      tracker.searchParams.set('s', shopDomain);
+      tracker.searchParams.set('u', String(sampleTarget));
+      tracker.searchParams.set('e', String(sampleExternal));
+      tracker.searchParams.set('nr', '1');
+      return {
+        base,
+        url: tracker.toString(),
+      };
+    });
+
+    const endpointProbes = await Promise.all(
+      configuredBases.slice(0, 4).map(async (base) => {
+        try {
+          const probeUrl = new URL('/api/track/automation-click?probe=1', base).toString();
+          const response = await fetch(probeUrl, {
+            method: 'GET',
+            redirect: 'manual',
+            cache: 'no-store',
+          });
+          return {
+            base,
+            ok: response.status === 400 || response.status === 405 || (response.status >= 200 && response.status < 400),
+            status: response.status,
+            error: null,
+          };
+        } catch (probeError) {
+          return {
+            base,
+            ok: false,
+            status: null,
+            error: probeError instanceof Error ? probeError.message : 'Probe failed',
+          };
+        }
+      }),
+    );
+
     const duplicateReminderGroups = (duplicateRows as Array<Record<string, unknown>>).map((row) => ({
       externalId: String(row.external_id ?? ''),
       stepKey: String(row.step_key ?? ''),
@@ -252,6 +352,7 @@ export async function GET(request: NextRequest) {
         details: {
           deliveries7d: clickTracking.deliveries7d,
           recentTargets: recentWelcomeDeliveries.slice(0, 5).map((row) => row.targetUrl),
+          resolvedTrackingBase,
         },
       });
     } else if (clickTracking.clicks7d > 0) {
@@ -278,6 +379,16 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    if (endpointProbes.some((probe) => !probe.ok)) {
+      issues.push({
+        severity: 'warning',
+        component: 'ClickTracking',
+        title: 'One or more tracking endpoint probes failed',
+        description: 'Diagnostics could not reach all configured tracking bases. Check domain/env alignment for tracking URLs.',
+        details: { endpointProbes },
+      });
+    }
+
     return NextResponse.json({
       ok: issues.every((issue) => issue.severity !== 'error'),
       checkedAt,
@@ -287,6 +398,12 @@ export async function GET(request: NextRequest) {
       duplicateReminderGroups,
       multiTokenExternalIds,
       clickTracking,
+      clickTrackingDebug: {
+        configuredBases,
+        resolvedTrackingBase,
+        sampleTrackingUrls,
+        endpointProbes,
+      },
       recentWelcomeDeliveries,
       recentAutomationClicks,
     } satisfies DiagnosticResult);

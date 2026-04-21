@@ -995,7 +995,63 @@ const buildCampaignClickTrackingUrl = (
     return '';
   }
 
-  const trackingBase = env.SHOPIFY_APP_URL || env.NEXT_PUBLIC_APP_URL || env.SHOPIFY_ROOT_APP_URL;
+  const resolveTrackingBase = () => {
+    const rawCandidates = [
+      env.SHOPIFY_APP_URL,
+      env.NEXT_PUBLIC_APP_URL,
+      env.SHOPIFY_ROOT_APP_URL,
+      'https://push-eagle-dashboard.vercel.app',
+    ];
+
+    const candidates: string[] = [];
+    for (const raw of rawCandidates) {
+      const value = String(raw ?? '').trim();
+      if (!value) {
+        continue;
+      }
+      try {
+        const parsed = new URL(value);
+        if (!/^https?:$/i.test(parsed.protocol)) {
+          continue;
+        }
+        const normalized = parsed.toString().replace(/\/$/, '');
+        if (!candidates.includes(normalized)) {
+          candidates.push(normalized);
+        }
+
+        if (parsed.hostname === 'push-eagle.vercel.app') {
+          const dashboardVariant = `${parsed.protocol}//push-eagle-dashboard.vercel.app`;
+          if (!candidates.includes(dashboardVariant)) {
+            candidates.push(dashboardVariant);
+          }
+        }
+      } catch {
+        // Ignore invalid tracking base candidates.
+      }
+    }
+
+    const dashboardCandidate = candidates.find((item) => {
+      try {
+        return new URL(item).hostname.includes('dashboard');
+      } catch {
+        return false;
+      }
+    });
+    if (dashboardCandidate) {
+      return dashboardCandidate;
+    }
+
+    const nonLocalCandidate = candidates.find((item) => {
+      try {
+        return new URL(item).hostname !== 'localhost';
+      } catch {
+        return false;
+      }
+    });
+    return nonLocalCandidate || candidates[0] || '';
+  };
+
+  const trackingBase = resolveTrackingBase();
 
   try {
     const trackerBase = new URL('/api/track/click', trackingBase);
@@ -1065,7 +1121,63 @@ const buildAutomationClickTrackingUrl = (
     return '';
   }
 
-  const trackingBase = env.SHOPIFY_APP_URL || env.NEXT_PUBLIC_APP_URL || env.SHOPIFY_ROOT_APP_URL;
+  const resolveTrackingBase = () => {
+    const rawCandidates = [
+      env.SHOPIFY_APP_URL,
+      env.NEXT_PUBLIC_APP_URL,
+      env.SHOPIFY_ROOT_APP_URL,
+      'https://push-eagle-dashboard.vercel.app',
+    ];
+
+    const candidates: string[] = [];
+    for (const raw of rawCandidates) {
+      const value = String(raw ?? '').trim();
+      if (!value) {
+        continue;
+      }
+      try {
+        const parsed = new URL(value);
+        if (!/^https?:$/i.test(parsed.protocol)) {
+          continue;
+        }
+        const normalized = parsed.toString().replace(/\/$/, '');
+        if (!candidates.includes(normalized)) {
+          candidates.push(normalized);
+        }
+
+        if (parsed.hostname === 'push-eagle.vercel.app') {
+          const dashboardVariant = `${parsed.protocol}//push-eagle-dashboard.vercel.app`;
+          if (!candidates.includes(dashboardVariant)) {
+            candidates.push(dashboardVariant);
+          }
+        }
+      } catch {
+        // Ignore invalid tracking base candidates.
+      }
+    }
+
+    const dashboardCandidate = candidates.find((item) => {
+      try {
+        return new URL(item).hostname.includes('dashboard');
+      } catch {
+        return false;
+      }
+    });
+    if (dashboardCandidate) {
+      return dashboardCandidate;
+    }
+
+    const nonLocalCandidate = candidates.find((item) => {
+      try {
+        return new URL(item).hostname !== 'localhost';
+      } catch {
+        return false;
+      }
+    });
+    return nonLocalCandidate || candidates[0] || '';
+  };
+
+  const trackingBase = resolveTrackingBase();
 
   try {
     const trackerBase = new URL('/api/track/automation-click', trackingBase);

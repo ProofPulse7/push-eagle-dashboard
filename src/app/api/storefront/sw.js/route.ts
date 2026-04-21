@@ -98,8 +98,6 @@ self.addEventListener('push', function(event) {
     icon: payload.data?.icon || payload.icon || payload.notification?.icon,
     image: payload.data?.image || payload.image || payload.notification?.image,
     actions: buildPushEagleActions(payload),
-    tag: payload.data?.trackPrimaryUrl || payload.data?.url || payload.fcmMessageId || payload.messageId || title,
-    renotify: false,
     data: {
       url,
       button1Url,
