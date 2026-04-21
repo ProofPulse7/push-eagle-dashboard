@@ -58,7 +58,7 @@ const buildPushEagleActions = (payload) => {
 messaging.onBackgroundMessage(function(payload) {
   console.log('Received background message ', payload);
   // Customize notification here
-  const notificationTitle = payload.notification?.title || 'Push Eagle';
+  const notificationTitle = payload.data?.title || payload.notification?.title || 'Push Eagle';
 
   const actions = buildPushEagleActions(payload);
 
@@ -70,9 +70,9 @@ messaging.onBackgroundMessage(function(payload) {
   const trackButton2Url = payload.data?.trackButton2Url || '';
 
   const notificationOptions = {
-    body: payload.notification?.body,
-    icon: payload.notification?.icon,
-    image: payload.notification?.image,
+    body: payload.data?.body || payload.notification?.body,
+    icon: payload.data?.icon || payload.notification?.icon,
+    image: payload.data?.image || payload.notification?.image,
     actions: actions.length > 0 ? actions : undefined,
     data: {
       url,
@@ -106,4 +106,44 @@ self.addEventListener('notificationclick', function(event) {
 
   clients.openWindow(targetUrl);
   event.waitUntil(sendTrackingBeacon(trackUrl));
+});
+
+// Fallback for VAPID/native web push payloads only.
+self.addEventListener('push', function(event) {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch (_error) {
+    payload = {};
+  }
+
+  // Firebase payloads are already handled by messaging.onBackgroundMessage.
+  if (payload && (payload.from || payload.fcmMessageId)) {
+    return;
+  }
+
+  const title = payload.title || payload.notification?.title || 'Push Eagle';
+  const url = payload.url || payload.data?.url || '/';
+  const button1Url = payload.data?.button1Url || url;
+  const button2Url = payload.data?.button2Url || '';
+  const trackPrimaryUrl = payload.data?.trackPrimaryUrl || '';
+  const trackButton1Url = payload.data?.trackButton1Url || '';
+  const trackButton2Url = payload.data?.trackButton2Url || '';
+
+  const options = {
+    body: payload.body || payload.data?.body || payload.notification?.body,
+    icon: payload.icon || payload.data?.icon || payload.notification?.icon,
+    image: payload.image || payload.data?.image || payload.notification?.image,
+    actions: buildPushEagleActions(payload),
+    data: {
+      url,
+      button1Url,
+      button2Url,
+      trackPrimaryUrl,
+      trackButton1Url,
+      trackButton2Url,
+    },
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
 });

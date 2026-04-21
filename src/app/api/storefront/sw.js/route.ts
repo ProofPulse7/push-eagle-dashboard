@@ -60,7 +60,7 @@ function buildPushEagleActions(payload) {
 }
 
 messaging.onBackgroundMessage(function(payload) {
-  const title = payload.notification?.title || 'Push Eagle';
+  const title = payload.data?.title || payload.notification?.title || 'Push Eagle';
   const url = payload.fcmOptions?.link || payload.data?.url || '/';
   const button1Url = payload.data?.button1Url || url;
   const button2Url = payload.data?.button2Url || '';
@@ -68,9 +68,9 @@ messaging.onBackgroundMessage(function(payload) {
   const trackButton1Url = payload.data?.trackButton1Url || '';
   const trackButton2Url = payload.data?.trackButton2Url || '';
   const options = {
-    body: payload.notification?.body,
-    icon: payload.notification?.icon,
-    image: payload.notification?.image,
+    body: payload.data?.body || payload.notification?.body,
+    icon: payload.data?.icon || payload.notification?.icon,
+    image: payload.data?.image || payload.notification?.image,
     actions: buildPushEagleActions(payload),
     data: {
       url,
@@ -110,6 +110,11 @@ self.addEventListener('push', function(event) {
     payload = event.data ? event.data.json() : {};
   } catch (_error) {
     payload = {};
+  }
+
+  // Firebase background payloads are rendered by messaging.onBackgroundMessage.
+  if (payload && (payload.from || payload.fcmMessageId)) {
+    return;
   }
 
   const title = payload.title || payload.notification?.title || 'Push Eagle';

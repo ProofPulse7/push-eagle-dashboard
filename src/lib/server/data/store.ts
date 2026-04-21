@@ -3320,22 +3320,13 @@ export const processAutomationJob = async (jobId: string) => {
       const messaging = getFirebaseAdminMessaging();
       const message = {
         token,
-        notification: {
-          title: payload.title,
-          body: payload.body,
-          imageUrl: payload.imageUrl ?? undefined,
-        },
-        webpush: {
-          fcmOptions: { link: trackedTargetUrl ?? undefined },
-          notification: {
-            icon: payload.iconUrl ?? undefined,
-            image: payload.imageUrl ?? undefined,
-            actions: automationActions.length > 0 ? automationActions : undefined,
-          },
-        },
         data: {
           source: 'automation',
           ruleKey: String(payload.ruleKey ?? ''),
+          title: payload.title ?? 'Push Eagle',
+          body: payload.body ?? '',
+          icon: payload.iconUrl ?? '',
+          image: payload.imageUrl ?? '',
           url: trackedTargetUrl ?? payload.targetUrl ?? '',
           button1Url: automationButton1Url ?? '',
           button2Url: automationButton2Url ?? '',
