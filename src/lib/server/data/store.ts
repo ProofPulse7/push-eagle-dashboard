@@ -152,6 +152,7 @@ type RecordConversionInput = {
   revenueCents: number;
   occurredAt?: string | null;
   externalId?: string | null;
+  cartToken?: string | null;
   campaignId?: string | null;
   customerId?: string | null;
   email?: string | null;
@@ -266,6 +267,7 @@ type OrderCreateIngestionPayload = {
   shopDomain: string;
   orderId: string;
   externalId?: string | null;
+  cartToken?: string | null;
   customerId?: string | null;
   email?: string | null;
   firstName?: string | null;
@@ -2738,6 +2740,7 @@ export const processIngestionJob = async (jobId: string) => {
         revenueCents: payload.totalPriceCents,
         occurredAt: payload.createdAt ?? null,
         externalId: payload.externalId ?? null,
+        cartToken: payload.cartToken ?? null,
         customerId: payload.customerId ?? null,
         email: payload.email ?? null,
         campaignId: getCampaignIdFromLandingSite(payload.landingSite),
@@ -6895,9 +6898,59 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     : null;
   const customerExternalId = input.customerId?.trim() ? `shopify_customer:${input.customerId.trim()}` : null;
 
+  const linkedExternalRows = (input.customerId || normalizedEmail)
+    ? await sql`
+      SELECT external_id
+      FROM shopify_customers
+      WHERE shop_domain = ${input.shopDomain}
+        AND external_id IS NOT NULL
+        AND (
+          (${input.customerId ?? null} IS NOT NULL AND customer_id = ${input.customerId ?? null})
+          OR (${normalizedEmail ?? null} IS NOT NULL AND LOWER(email) = ${normalizedEmail ?? null})
+        )
+      ORDER BY updated_at DESC
+      LIMIT 25
+    `
+    : [];
+
+  const historicalOrderExternalRows = (input.customerId || normalizedEmail)
+    ? await sql`
+      SELECT external_id
+      FROM shopify_orders
+      WHERE shop_domain = ${input.shopDomain}
+        AND external_id IS NOT NULL
+        AND external_id <> ''
+        AND (
+          (${input.customerId ?? null} IS NOT NULL AND customer_id = ${input.customerId ?? null})
+          OR (${normalizedEmail ?? null} IS NOT NULL AND LOWER(email) = ${normalizedEmail ?? null})
+        )
+      ORDER BY created_at DESC
+      LIMIT 25
+    `
+    : [];
+
+  const cartExternalRows = input.cartToken
+    ? await sql`
+      SELECT external_id
+      FROM subscriber_activity_events
+      WHERE shop_domain = ${input.shopDomain}
+        AND cart_token = ${input.cartToken}
+        AND created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
+      ORDER BY created_at DESC
+      LIMIT 25
+    `
+    : [];
+
   const externalIdCandidates = Array.from(
     new Set(
-      [input.externalId?.trim() ?? null, customerExternalId, emailExternalId].filter((value): value is string => Boolean(value)),
+      [
+        input.externalId?.trim() ?? null,
+        customerExternalId,
+        emailExternalId,
+        ...linkedExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
+        ...historicalOrderExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
+        ...cartExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
+      ].filter((value): value is string => Boolean(value)),
     ),
   );
 

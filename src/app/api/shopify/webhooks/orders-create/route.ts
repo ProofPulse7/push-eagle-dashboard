@@ -55,6 +55,26 @@ const getExternalIdFromNoteAttributes = (noteAttributes?: Array<{ name?: string 
   return null;
 };
 
+const getCartTokenFromNoteAttributes = (noteAttributes?: Array<{ name?: string | null; value?: string | null }>) => {
+  if (!Array.isArray(noteAttributes)) {
+    return null;
+  }
+
+  const keys = new Set(['cart_token', 'carttoken', '_shopify_cart_token', 'checkout_token']);
+  for (const pair of noteAttributes) {
+    const key = String(pair?.name ?? '').trim().toLowerCase();
+    if (!keys.has(key)) {
+      continue;
+    }
+    const value = String(pair?.value ?? '').trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  return null;
+};
+
 const normalizeCustomerTags = (tags?: string | null) => {
   if (!tags) {
     return null;
@@ -94,6 +114,7 @@ export async function POST(request: Request) {
     }
 
     const externalIdFromNotes = getExternalIdFromNoteAttributes(payload.note_attributes);
+    const cartTokenFromNotes = getCartTokenFromNoteAttributes(payload.note_attributes);
     const externalId = externalIdFromNotes ?? getCustomerExternalId({
       customerId: payload.customer?.id ? String(payload.customer.id) : null,
       email: payload.customer?.email ?? null,
@@ -111,6 +132,7 @@ export async function POST(request: Request) {
         shopDomain,
         orderId,
         externalId,
+        cartToken: cartTokenFromNotes,
         customerId: payload.customer?.id ? String(payload.customer.id) : null,
         email: payload.customer?.email ?? null,
         firstName: payload.customer?.first_name ?? null,

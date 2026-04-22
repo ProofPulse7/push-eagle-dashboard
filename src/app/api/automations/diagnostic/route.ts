@@ -81,6 +81,10 @@ type DiagnosticResult = {
     errorMessage: string | null;
     updatedAt: string | null;
   }>;
+  welcomeTouchIdentityDebug: {
+    recentClickExternalIds: string[];
+    recentDeliveryExternalIds: string[];
+  };
 };
 
 const round2 = (value: number) => Math.round(value * 100) / 100;
@@ -107,6 +111,7 @@ export async function GET(request: NextRequest) {
       automationRevenueRows,
       welcomeRevenueRows,
       welcomeTouchRows,
+      welcomeExternalRows,
       attributedTouchRows,
       unattributedRows,
     ] = await Promise.all([
@@ -233,6 +238,25 @@ export async function GET(request: NextRequest) {
         FROM automation_clicks
         WHERE shop_domain = ${shopDomain}
           AND rule_key = 'welcome_subscriber'
+      `,
+      sql`
+        SELECT source, external_id
+        FROM (
+          SELECT 'click'::TEXT AS source, external_id, clicked_at AS occurred_at
+          FROM automation_clicks
+          WHERE shop_domain = ${shopDomain}
+            AND rule_key = 'welcome_subscriber'
+            AND external_id IS NOT NULL
+          UNION ALL
+          SELECT 'delivery'::TEXT AS source, external_id, delivered_at AS occurred_at
+          FROM automation_deliveries
+          WHERE shop_domain = ${shopDomain}
+            AND rule_key = 'welcome_subscriber'
+            AND external_id IS NOT NULL
+        ) w
+        WHERE occurred_at >= NOW() - INTERVAL '7 days'
+        ORDER BY occurred_at DESC
+        LIMIT 80
       `,
       sql`
         SELECT *
@@ -371,6 +395,25 @@ export async function GET(request: NextRequest) {
       updatedAt: row.updated_at ? new Date(String(row.updated_at)).toISOString() : null,
     }));
 
+    const welcomeTouchIdentityDebug: DiagnosticResult['welcomeTouchIdentityDebug'] = {
+      recentClickExternalIds: Array.from(
+        new Set(
+          (welcomeExternalRows as Array<Record<string, unknown>>)
+            .filter((row) => String(row.source ?? '') === 'click')
+            .map((row) => String(row.external_id ?? ''))
+            .filter(Boolean),
+        ),
+      ).slice(0, 20),
+      recentDeliveryExternalIds: Array.from(
+        new Set(
+          (welcomeExternalRows as Array<Record<string, unknown>>)
+            .filter((row) => String(row.source ?? '') === 'delivery')
+            .map((row) => String(row.external_id ?? ''))
+            .filter(Boolean),
+        ),
+      ).slice(0, 20),
+    };
+
     const attributionSummary: DiagnosticResult['attributionSummary'] = {
       orders7d,
       totalRevenueCents7d,
@@ -470,6 +513,7 @@ export async function GET(request: NextRequest) {
           clickWindowDays: attributionSettings.clickWindowDays,
           impressionWindowDays: attributionSettings.impressionWindowDays,
           sampleUnattributedOrders: recentUnattributedOrders.slice(0, 5),
+          welcomeTouchIdentityDebug,
         },
       });
     }
@@ -521,6 +565,7 @@ export async function GET(request: NextRequest) {
       recentAttributedTouches,
       recentUnattributedOrders,
       recentFailedIngestionJobs,
+      welcomeTouchIdentityDebug,
     } satisfies DiagnosticResult);
   } catch (error) {
     return NextResponse.json(
@@ -580,7 +625,82 @@ export async function GET(request: NextRequest) {
         recentAttributedTouches: [],
         recentUnattributedOrders: [],
         recentFailedIngestionJobs: [],
+        welcomeTouchIdentityDebug: {
+          recentClickExternalIds: [],
+          recentDeliveryExternalIds: [],
+        },
       } satisfies DiagnosticResult,
+      { status: 500 },
+    );
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = (await request.json().catch(() => ({}))) as { shop?: string; action?: string };
+    const shopDomain = String(body.shop ?? '').trim().toLowerCase() || request.nextUrl.searchParams.get('shop')?.trim().toLowerCase();
+    if (!shopDomain) {
+      return NextResponse.json({ ok: false, error: 'Missing shop parameter.' }, { status: 400 });
+    }
+
+    if (body.action !== 'clear_attribution_test_data') {
+      return NextResponse.json({ ok: false, error: 'Unsupported action.' }, { status: 400 });
+    }
+
+    const sql = getNeonSql();
+
+    const [ordersCountRows, ingestionCountRows, webhookCountRows] = await Promise.all([
+      sql`SELECT COUNT(*)::INT AS count FROM shopify_orders WHERE shop_domain = ${shopDomain}`,
+      sql`SELECT COUNT(*)::INT AS count FROM ingestion_jobs WHERE shop_domain = ${shopDomain} AND job_type = 'shopify_order_create'`,
+      sql`SELECT COUNT(*)::INT AS count FROM webhook_events WHERE shop_domain = ${shopDomain} AND topic = 'orders/create'`,
+    ]);
+
+    await sql`DELETE FROM shopify_order_items WHERE shop_domain = ${shopDomain}`;
+    await sql`DELETE FROM shopify_orders WHERE shop_domain = ${shopDomain}`;
+    await sql`DELETE FROM ingestion_jobs WHERE shop_domain = ${shopDomain} AND job_type = 'shopify_order_create'`;
+    await sql`DELETE FROM webhook_events WHERE shop_domain = ${shopDomain} AND topic = 'orders/create'`;
+
+    await sql`
+      UPDATE campaign_deliveries
+      SET converted_at = NULL, order_id = NULL, revenue_cents = 0
+      WHERE shop_domain = ${shopDomain}
+    `;
+    await sql`
+      UPDATE campaign_clicks
+      SET converted_at = NULL, order_id = NULL, revenue_cents = 0
+      WHERE shop_domain = ${shopDomain}
+    `;
+    await sql`
+      UPDATE automation_deliveries
+      SET converted_at = NULL, order_id = NULL, revenue_cents = 0
+      WHERE shop_domain = ${shopDomain}
+    `;
+    await sql`
+      UPDATE automation_clicks
+      SET converted_at = NULL, order_id = NULL, revenue_cents = 0
+      WHERE shop_domain = ${shopDomain}
+    `;
+    await sql`
+      UPDATE campaigns
+      SET revenue_cents = 0
+      WHERE shop_domain = ${shopDomain}
+    `;
+
+    return NextResponse.json({
+      ok: true,
+      shopDomain,
+      cleared: {
+        orders: Number(ordersCountRows[0]?.count ?? 0),
+        ingestionJobs: Number(ingestionCountRows[0]?.count ?? 0),
+        webhookEvents: Number(webhookCountRows[0]?.count ?? 0),
+      },
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Failed to clear attribution test data.',
+      },
       { status: 500 },
     );
   }

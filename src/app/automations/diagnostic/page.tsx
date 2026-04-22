@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState } from 'react';
 
 import { useSearchParams } from 'next/navigation';
-import { AlertCircle, AlertTriangle, CheckCircle, Copy, Info, Loader2, RefreshCw } from 'lucide-react';
+import { AlertCircle, AlertTriangle, CheckCircle, Copy, Info, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -87,6 +87,10 @@ interface DiagnosticResult {
     errorMessage: string | null;
     updatedAt: string | null;
   }>;
+  welcomeTouchIdentityDebug: {
+    recentClickExternalIds: string[];
+    recentDeliveryExternalIds: string[];
+  };
 }
 
 const formatMoney = (cents: number) => {
@@ -106,6 +110,7 @@ function DiagnosticPageContent() {
 
   const [diagnostic, setDiagnostic] = useState<DiagnosticResult | null>(null);
   const [loading, setLoading] = useState(true);
+  const [clearing, setClearing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -141,6 +146,38 @@ function DiagnosticPageContent() {
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
       setError('Failed to copy diagnostic JSON.');
+    }
+  };
+
+  const clearAttributionTestData = async () => {
+    if (!shop || clearing) {
+      return;
+    }
+
+    setClearing(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/automations/diagnostic?shop=${encodeURIComponent(shop)}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          shop,
+          action: 'clear_attribution_test_data',
+        }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || 'Failed to clear attribution test data.');
+      }
+
+      await fetchDiagnostic();
+    } catch (clearError) {
+      setError(clearError instanceof Error ? clearError.message : 'Failed to clear attribution test data.');
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -196,6 +233,10 @@ function DiagnosticPageContent() {
           <p className="mt-1 text-sm text-muted-foreground">Shop: {shop}</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={clearAttributionTestData} disabled={loading || clearing}>
+            <Trash2 className="mr-2 h-4 w-4" />
+            {clearing ? 'Clearing...' : 'Clear attribution test data'}
+          </Button>
           <Button variant="outline" size="sm" onClick={fetchDiagnostic} disabled={loading}>
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
@@ -250,6 +291,39 @@ function DiagnosticPageContent() {
               <div className="rounded-lg border p-4">
                 <div className="text-2xl font-bold text-slate-900">{diagnostic.attributionSummary.attributedRevenueRatePercent}%</div>
                 <div className="text-sm text-muted-foreground">Attributed revenue rate</div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Welcome Identity Debug</CardTitle>
+              <CardDescription>Compare unattributed order externalId values with recent welcome delivery/click external IDs.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-6 md:grid-cols-2">
+              <div>
+                <div className="mb-2 text-sm font-medium">Recent welcome click external IDs</div>
+                {(diagnostic.welcomeTouchIdentityDebug?.recentClickExternalIds ?? []).length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No recent click external IDs.</p>
+                ) : (
+                  <div className="space-y-2 text-sm">
+                    {diagnostic.welcomeTouchIdentityDebug.recentClickExternalIds.map((externalId) => (
+                      <div key={`click-${externalId}`} className="break-all rounded border p-2">{externalId}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="mb-2 text-sm font-medium">Recent welcome delivery external IDs</div>
+                {(diagnostic.welcomeTouchIdentityDebug?.recentDeliveryExternalIds ?? []).length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No recent delivery external IDs.</p>
+                ) : (
+                  <div className="space-y-2 text-sm">
+                    {diagnostic.welcomeTouchIdentityDebug.recentDeliveryExternalIds.map((externalId) => (
+                      <div key={`delivery-${externalId}`} className="break-all rounded border p-2">{externalId}</div>
+                    ))}
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
