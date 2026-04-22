@@ -7053,23 +7053,23 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
       FROM automation_clicks
       WHERE shop_domain = ${input.shopDomain}
         AND clicked_at >= ${windowStart}
-        AND (${ruleKey ?? null} IS NULL OR rule_key = ${ruleKey ?? null})
+        AND (${ruleKey ?? null}::text IS NULL OR rule_key = ${ruleKey ?? null}::text)
         AND (
           (
-            ${input.ipAddress ?? null} IS NOT NULL
-            AND ${input.userAgent ?? null} IS NOT NULL
-            AND ip_address = ${input.ipAddress ?? null}
-            AND user_agent = ${input.userAgent ?? null}
+            ${input.ipAddress ?? null}::text IS NOT NULL
+            AND ${input.userAgent ?? null}::text IS NOT NULL
+            AND ip_address = ${input.ipAddress ?? null}::text
+            AND user_agent = ${input.userAgent ?? null}::text
           )
           OR (
-            ${input.ipAddress ?? null} IS NOT NULL
-            AND ${input.userAgent ?? null} IS NULL
-            AND ip_address = ${input.ipAddress ?? null}
+            ${input.ipAddress ?? null}::text IS NOT NULL
+            AND ${input.userAgent ?? null}::text IS NULL
+            AND ip_address = ${input.ipAddress ?? null}::text
           )
           OR (
-            ${input.ipAddress ?? null} IS NULL
-            AND ${input.userAgent ?? null} IS NOT NULL
-            AND user_agent = ${input.userAgent ?? null}
+            ${input.ipAddress ?? null}::text IS NULL
+            AND ${input.userAgent ?? null}::text IS NOT NULL
+            AND user_agent = ${input.userAgent ?? null}::text
           )
         )
       ORDER BY clicked_at DESC
