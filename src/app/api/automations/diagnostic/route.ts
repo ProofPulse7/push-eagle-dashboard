@@ -103,6 +103,7 @@ type DiagnosticResult = {
       browserIp: string | null;
       userAgent: string | null;
       cartToken: string | null;
+      clientId: string | null;
     };
   }>;
   automationClicksDebug?: Array<{
@@ -518,6 +519,7 @@ export async function GET(request: NextRequest) {
           browserIp: payload?.browserIp ? String(payload.browserIp) : null,
           userAgent: payload?.userAgent ? String(payload.userAgent) : null,
           cartToken: payload?.cartToken ? String(payload.cartToken) : null,
+          clientId: payload?.clientId ? String(payload.clientId) : null,
         },
       };
     });

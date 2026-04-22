@@ -153,6 +153,7 @@ type RecordConversionInput = {
   occurredAt?: string | null;
   externalId?: string | null;
   cartToken?: string | null;
+  clientId?: string | null;
   campaignId?: string | null;
   customerId?: string | null;
   email?: string | null;
@@ -269,6 +270,7 @@ type OrderCreateIngestionPayload = {
   orderId: string;
   externalId?: string | null;
   cartToken?: string | null;
+  clientId?: string | null;
   browserIp?: string | null;
   customerId?: string | null;
   email?: string | null;
@@ -2761,6 +2763,7 @@ export const processIngestionJob = async (jobId: string) => {
         occurredAt: payload.createdAt ?? null,
         externalId: payload.externalId ?? null,
         cartToken: payload.cartToken ?? null,
+        clientId: payload.clientId ?? null,
         customerId: payload.customerId ?? null,
         email: payload.email ?? null,
         campaignId: getCampaignIdFromLandingSite(payload.landingSite),
@@ -7010,6 +7013,31 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     `
     : [];
 
+  const clientExternalRows = input.clientId
+    ? await sql`
+      SELECT external_id
+      FROM (
+        SELECT external_id, created_at
+        FROM subscriber_activity_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND COALESCE(metadata ->> 'clientId', '') = ${input.clientId}
+          AND created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
+
+        UNION ALL
+
+        SELECT external_id, created_at
+        FROM pixel_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND COALESCE(client_id, '') = ${input.clientId}
+          AND created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
+      ) stitched
+      WHERE external_id IS NOT NULL
+        AND external_id <> ''
+      ORDER BY created_at DESC
+      LIMIT 50
+    `
+    : [];
+
   const externalIdCandidates = Array.from(
     new Set(
       [
@@ -7019,6 +7047,7 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
         ...linkedExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...historicalOrderExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...cartExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
+        ...clientExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
       ].filter((value): value is string => Boolean(value)),
     ),
   );

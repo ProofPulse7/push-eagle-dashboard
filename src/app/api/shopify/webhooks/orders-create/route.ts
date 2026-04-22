@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 
+import { getNeonSql } from '@/lib/integrations/database/neon';
 import { verifyShopifyWebhookSignature } from '@/lib/integrations/shopify/verify';
 import { enqueueIngestionJob, processIngestionJob, registerWebhookEvent } from '@/lib/server/data/store';
 import { parseShopDomain } from '@/lib/server/shop-context';
@@ -33,6 +34,8 @@ type ShopifyOrderPayload = {
     browser_height?: number | null;
   } | null;
   browser_ip?: string | null;
+  cart_token?: string | null;
+  checkout_token?: string | null;
   note_attributes?: Array<{ name?: string | null; value?: string | null }>;
 };
 
@@ -75,6 +78,48 @@ const getCartTokenFromNoteAttributes = (noteAttributes?: Array<{ name?: string |
   return null;
 };
 
+const getClientIdFromNoteAttributes = (noteAttributes?: Array<{ name?: string | null; value?: string | null }>) => {
+  if (!Array.isArray(noteAttributes)) {
+    return null;
+  }
+
+  const keys = new Set(['push_eagle_client_id', 'pe_client_id', '_push_eagle_client_id']);
+  for (const pair of noteAttributes) {
+    const key = String(pair?.name ?? '').trim().toLowerCase();
+    if (!keys.has(key)) {
+      continue;
+    }
+    const value = String(pair?.value ?? '').trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  return null;
+};
+
+const findExternalIdByCartToken = async (shopDomain: string, cartToken?: string | null) => {
+  const normalizedToken = String(cartToken ?? '').trim();
+  if (!normalizedToken) {
+    return null;
+  }
+
+  const sql = getNeonSql();
+  const rows = await sql`
+    SELECT external_id
+    FROM subscriber_activity_events
+    WHERE shop_domain = ${shopDomain}
+      AND cart_token = ${normalizedToken}
+      AND external_id IS NOT NULL
+      AND external_id <> ''
+      AND created_at >= NOW() - INTERVAL '30 days'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+
+  return rows[0]?.external_id ? String(rows[0].external_id) : null;
+};
+
 const normalizeCustomerTags = (tags?: string | null) => {
   if (!tags) {
     return null;
@@ -115,7 +160,10 @@ export async function POST(request: Request) {
 
     const externalIdFromNotes = getExternalIdFromNoteAttributes(payload.note_attributes);
     const cartTokenFromNotes = getCartTokenFromNoteAttributes(payload.note_attributes);
-    const externalId = externalIdFromNotes ?? getCustomerExternalId({
+    const cartToken = cartTokenFromNotes ?? payload.checkout_token ?? payload.cart_token ?? null;
+    const clientIdFromNotes = getClientIdFromNoteAttributes(payload.note_attributes);
+    const externalIdFromCartToken = await findExternalIdByCartToken(shopDomain, cartToken);
+    const externalId = externalIdFromNotes ?? externalIdFromCartToken ?? getCustomerExternalId({
       customerId: payload.customer?.id ? String(payload.customer.id) : null,
       email: payload.customer?.email ?? null,
     });
@@ -132,7 +180,8 @@ export async function POST(request: Request) {
         shopDomain,
         orderId,
         externalId,
-        cartToken: cartTokenFromNotes,
+        cartToken,
+        clientId: clientIdFromNotes,
         customerId: payload.customer?.id ? String(payload.customer.id) : null,
         email: payload.customer?.email ?? null,
         firstName: payload.customer?.first_name ?? null,
@@ -167,7 +216,7 @@ export async function POST(request: Request) {
       jobId,
       processedNow,
       processingError,
-      cartToken: cartTokenFromNotes,
+      cartToken,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to process order webhook.';
