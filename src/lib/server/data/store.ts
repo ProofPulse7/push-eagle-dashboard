@@ -6939,11 +6939,13 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     id: number;
     campaignId: string;
     touchedAt: Date;
+    table: 'campaign_clicks' | 'campaign_deliveries';
   };
   type AutomationTouch = {
     id: number;
     ruleKey: string;
     touchedAt: Date;
+    table: 'automation_clicks' | 'automation_deliveries';
   };
 
   const windowDays = settings.attributionModel === 'click'
@@ -6968,6 +6970,7 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
         id: Number(row.id),
         campaignId: String(row.campaign_id),
         touchedAt: new Date(String(row.clicked_at)),
+        table: 'campaign_clicks' as const,
       }))
       : [];
 
@@ -6983,10 +6986,28 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
         id: Number(row.id),
         ruleKey: String(row.rule_key),
         touchedAt: new Date(String(row.clicked_at)),
+        table: 'automation_clicks' as const,
       }))
       : [];
   } else {
-    campaignTouches = externalIdCandidates.length > 0
+    const campaignClickTouches = externalIdCandidates.length > 0
+      ? (await sql`
+        SELECT c.id, c.campaign_id, c.clicked_at
+        FROM campaign_clicks c
+        JOIN subscribers s ON s.id = c.subscriber_id
+        WHERE c.shop_domain = ${input.shopDomain}
+          AND s.external_id = ANY(${externalIdCandidates})
+          AND c.clicked_at >= ${windowStart}
+        ORDER BY c.clicked_at DESC
+      `).map((row) => ({
+        id: Number(row.id),
+        campaignId: String(row.campaign_id),
+        touchedAt: new Date(String(row.clicked_at)),
+        table: 'campaign_clicks' as const,
+      }))
+      : [];
+
+    const campaignImpressionTouches = externalIdCandidates.length > 0
       ? (await sql`
         SELECT d.id, d.campaign_id, d.delivered_at
         FROM campaign_deliveries d
@@ -6999,8 +7020,12 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
         id: Number(row.id),
         campaignId: String(row.campaign_id),
         touchedAt: new Date(String(row.delivered_at)),
+        table: 'campaign_deliveries' as const,
       }))
       : [];
+
+    campaignTouches = [...campaignClickTouches, ...campaignImpressionTouches]
+      .sort((a, b) => b.touchedAt.getTime() - a.touchedAt.getTime());
 
     if (campaignTouches.length === 0 && input.campaignId) {
       const fallbackRows = await sql`
@@ -7015,10 +7040,27 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
         id: Number(row.id),
         campaignId: String(row.campaign_id),
         touchedAt: new Date(String(row.delivered_at)),
+        table: 'campaign_deliveries' as const,
       }));
     }
 
-    automationTouches = externalIdCandidates.length > 0
+    const automationClickTouches = externalIdCandidates.length > 0
+      ? (await sql`
+        SELECT id, rule_key, clicked_at
+        FROM automation_clicks
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id = ANY(${externalIdCandidates})
+          AND clicked_at >= ${windowStart}
+        ORDER BY clicked_at DESC
+      `).map((row) => ({
+        id: Number(row.id),
+        ruleKey: String(row.rule_key),
+        touchedAt: new Date(String(row.clicked_at)),
+        table: 'automation_clicks' as const,
+      }))
+      : [];
+
+    const automationImpressionTouches = externalIdCandidates.length > 0
       ? (await sql`
         SELECT id, rule_key, delivered_at
         FROM automation_deliveries
@@ -7030,8 +7072,12 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
         id: Number(row.id),
         ruleKey: String(row.rule_key),
         touchedAt: new Date(String(row.delivered_at)),
+        table: 'automation_deliveries' as const,
       }))
       : [];
+
+    automationTouches = [...automationClickTouches, ...automationImpressionTouches]
+      .sort((a, b) => b.touchedAt.getTime() - a.touchedAt.getTime());
   }
 
   const campaignById = new Map<string, CampaignTouch>();
@@ -7076,11 +7122,8 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     return { attributed: false };
   }
 
-  const campaignTable = settings.attributionModel === 'click' ? 'campaign_clicks' : 'campaign_deliveries';
-  const automationTable = settings.attributionModel === 'click' ? 'automation_clicks' : 'automation_deliveries';
-
   for (const touch of selectedCampaignTouches) {
-    if (campaignTable === 'campaign_clicks') {
+    if (touch.table === 'campaign_clicks') {
       await sql`
         UPDATE campaign_clicks
         SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
@@ -7105,7 +7148,7 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
   }
 
   for (const touch of selectedAutomationTouches) {
-    if (automationTable === 'automation_clicks') {
+    if (touch.table === 'automation_clicks') {
       await sql`
         UPDATE automation_clicks
         SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}

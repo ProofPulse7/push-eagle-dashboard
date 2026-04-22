@@ -50,6 +50,14 @@ type DiagnosticResult = {
     ordersCreateEvents7d: number;
     lastOrdersCreateEventAt: string | null;
   };
+  ingestionHealth: {
+    pendingJobs: number;
+    processingJobs: number;
+    failedJobs: number;
+    processedJobs7d: number;
+    lastProcessedAt: string | null;
+    lastFailedAt: string | null;
+  };
   identityCoverage: {
     orders7d: number;
     withExternalId: number;
@@ -65,6 +73,13 @@ type DiagnosticResult = {
     externalId: string | null;
     customerId: string | null;
     email: string | null;
+  }>;
+  recentFailedIngestionJobs: Array<{
+    id: string;
+    jobType: string;
+    attempts: number;
+    errorMessage: string | null;
+    updatedAt: string | null;
   }>;
 };
 
@@ -83,6 +98,8 @@ export async function GET(request: NextRequest) {
 
     const [
       webhookRows,
+      ingestionRows,
+      failedIngestionRows,
       ordersRows,
       attributedOrderRows,
       identityRows,
@@ -100,6 +117,27 @@ export async function GET(request: NextRequest) {
         FROM webhook_events
         WHERE shop_domain = ${shopDomain}
           AND topic = 'orders/create'
+      `,
+      sql`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'pending')::INT AS pending_jobs,
+          COUNT(*) FILTER (WHERE status = 'processing')::INT AS processing_jobs,
+          COUNT(*) FILTER (WHERE status = 'failed')::INT AS failed_jobs,
+          COUNT(*) FILTER (WHERE status = 'processed' AND processed_at >= NOW() - INTERVAL '7 days')::INT AS processed_jobs_7d,
+          MAX(processed_at) AS last_processed_at,
+          MAX(updated_at) FILTER (WHERE status = 'failed') AS last_failed_at
+        FROM ingestion_jobs
+        WHERE shop_domain = ${shopDomain}
+          AND job_type = 'shopify_order_create'
+      `,
+      sql`
+        SELECT id, job_type, attempts, error_message, updated_at
+        FROM ingestion_jobs
+        WHERE shop_domain = ${shopDomain}
+          AND job_type = 'shopify_order_create'
+          AND status = 'failed'
+        ORDER BY updated_at DESC
+        LIMIT 20
       `,
       sql`
         SELECT
@@ -286,6 +324,28 @@ export async function GET(request: NextRequest) {
       clicks: Number(welcomeTouchRows[0]?.clicks_7d ?? 0) + Number(welcomeTouchRows[1]?.clicks_7d ?? 0),
     };
 
+    const webhookHealth = {
+      ordersCreateEvents7d: Number(webhookRows[0]?.events_7d ?? 0),
+      lastOrdersCreateEventAt: webhookRows[0]?.last_event_at ? new Date(String(webhookRows[0].last_event_at)).toISOString() : null,
+    };
+
+    const ingestionHealth: DiagnosticResult['ingestionHealth'] = {
+      pendingJobs: Number(ingestionRows[0]?.pending_jobs ?? 0),
+      processingJobs: Number(ingestionRows[0]?.processing_jobs ?? 0),
+      failedJobs: Number(ingestionRows[0]?.failed_jobs ?? 0),
+      processedJobs7d: Number(ingestionRows[0]?.processed_jobs_7d ?? 0),
+      lastProcessedAt: ingestionRows[0]?.last_processed_at ? new Date(String(ingestionRows[0].last_processed_at)).toISOString() : null,
+      lastFailedAt: ingestionRows[0]?.last_failed_at ? new Date(String(ingestionRows[0].last_failed_at)).toISOString() : null,
+    };
+
+    const identityCoverage = {
+      orders7d,
+      withExternalId,
+      withCustomerId,
+      withEmail,
+      missingAllIdentity,
+    };
+
     const recentAttributedTouches = (attributedTouchRows as Array<Record<string, unknown>>).map((row) => ({
       sourceType: String(row.source_type) as AttributionTouch['sourceType'],
       sourceId: String(row.source_id ?? ''),
@@ -303,6 +363,14 @@ export async function GET(request: NextRequest) {
       email: row.email ? String(row.email) : null,
     }));
 
+    const recentFailedIngestionJobs = (failedIngestionRows as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id ?? ''),
+      jobType: String(row.job_type ?? ''),
+      attempts: Number(row.attempts ?? 0),
+      errorMessage: row.error_message ? String(row.error_message) : null,
+      updatedAt: row.updated_at ? new Date(String(row.updated_at)).toISOString() : null,
+    }));
+
     const attributionSummary: DiagnosticResult['attributionSummary'] = {
       orders7d,
       totalRevenueCents7d,
@@ -315,19 +383,6 @@ export async function GET(request: NextRequest) {
       welcomeAttributedOrders7d,
       welcomeAttributedRevenueCents7d,
       welcomeTouches7d,
-    };
-
-    const webhookHealth = {
-      ordersCreateEvents7d: Number(webhookRows[0]?.events_7d ?? 0),
-      lastOrdersCreateEventAt: webhookRows[0]?.last_event_at ? new Date(String(webhookRows[0].last_event_at)).toISOString() : null,
-    };
-
-    const identityCoverage = {
-      orders7d,
-      withExternalId,
-      withCustomerId,
-      withEmail,
-      missingAllIdentity,
     };
 
     const issues: DiagnosticIssue[] = [];
@@ -347,6 +402,48 @@ export async function GET(request: NextRequest) {
         title: 'orders/create webhook events are being ingested',
         description: 'Order webhook ingestion is active.',
         details: webhookHealth,
+      });
+    }
+
+    if (ingestionHealth.failedJobs > 0) {
+      issues.push({
+        severity: 'error',
+        component: 'AttributionIngestion',
+        title: 'Order ingestion jobs failed',
+        description: 'One or more shopify_order_create ingestion jobs are failing, so revenue attribution cannot complete for those orders.',
+        details: {
+          ingestionHealth,
+          recentFailedIngestionJobs: recentFailedIngestionJobs.slice(0, 5),
+        },
+      });
+    } else if (ingestionHealth.pendingJobs > 0 || ingestionHealth.processingJobs > 0) {
+      issues.push({
+        severity: 'warning',
+        component: 'AttributionIngestion',
+        title: 'Order ingestion jobs are queued',
+        description: 'Some order ingestion jobs are pending or processing; attribution metrics may lag until jobs complete.',
+        details: ingestionHealth,
+      });
+    } else {
+      issues.push({
+        severity: 'info',
+        component: 'AttributionIngestion',
+        title: 'Order ingestion queue is healthy',
+        description: 'No failed or stuck shopify_order_create ingestion jobs were detected.',
+        details: ingestionHealth,
+      });
+    }
+
+    if (webhookHealth.ordersCreateEvents7d > 0 && orders7d === 0) {
+      issues.push({
+        severity: 'warning',
+        component: 'RevenueAttribution',
+        title: 'Order webhooks exist but no orders are stored in attribution tables',
+        description: 'Webhook events were received, but shopify_orders has no 7-day records. This usually indicates ingestion lag/failure or payload date mismatch.',
+        details: {
+          webhookHealth,
+          ingestionHealth,
+        },
       });
     }
 
@@ -419,9 +516,11 @@ export async function GET(request: NextRequest) {
       attributionSettings,
       attributionSummary,
       webhookHealth,
+      ingestionHealth,
       identityCoverage,
       recentAttributedTouches,
       recentUnattributedOrders,
+      recentFailedIngestionJobs,
     } satisfies DiagnosticResult);
   } catch (error) {
     return NextResponse.json(
@@ -463,6 +562,14 @@ export async function GET(request: NextRequest) {
           ordersCreateEvents7d: 0,
           lastOrdersCreateEventAt: null,
         },
+        ingestionHealth: {
+          pendingJobs: 0,
+          processingJobs: 0,
+          failedJobs: 0,
+          processedJobs7d: 0,
+          lastProcessedAt: null,
+          lastFailedAt: null,
+        },
         identityCoverage: {
           orders7d: 0,
           withExternalId: 0,
@@ -472,6 +579,7 @@ export async function GET(request: NextRequest) {
         },
         recentAttributedTouches: [],
         recentUnattributedOrders: [],
+        recentFailedIngestionJobs: [],
       } satisfies DiagnosticResult,
       { status: 500 },
     );

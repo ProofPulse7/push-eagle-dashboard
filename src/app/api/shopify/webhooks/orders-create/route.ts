@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { verifyShopifyWebhookSignature } from '@/lib/integrations/shopify/verify';
-import { enqueueIngestionJob, registerWebhookEvent } from '@/lib/server/data/store';
+import { enqueueIngestionJob, processIngestionJob, registerWebhookEvent } from '@/lib/server/data/store';
 import { parseShopDomain } from '@/lib/server/shop-context';
 import { getCustomerExternalId } from '@/lib/server/storefront-identity';
 
@@ -128,7 +128,23 @@ export async function POST(request: Request) {
       },
     });
 
-    return NextResponse.json({ ok: true, shopDomain, queued: true, jobId });
+    let processedNow = false;
+    let processingError: string | null = null;
+
+    if (jobId) {
+      const processResult = await processIngestionJob(jobId);
+      processedNow = Boolean(processResult.processed);
+      processingError = processResult.error ?? null;
+    }
+
+    return NextResponse.json({
+      ok: true,
+      shopDomain,
+      queued: true,
+      jobId,
+      processedNow,
+      processingError,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to process order webhook.';
     return NextResponse.json({ ok: false, error: message }, { status: 400 });

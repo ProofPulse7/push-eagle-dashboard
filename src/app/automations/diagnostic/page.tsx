@@ -50,6 +50,14 @@ interface DiagnosticResult {
     ordersCreateEvents7d: number;
     lastOrdersCreateEventAt: string | null;
   };
+  ingestionHealth: {
+    pendingJobs: number;
+    processingJobs: number;
+    failedJobs: number;
+    processedJobs7d: number;
+    lastProcessedAt: string | null;
+    lastFailedAt: string | null;
+  };
   identityCoverage: {
     orders7d: number;
     withExternalId: number;
@@ -71,6 +79,13 @@ interface DiagnosticResult {
     externalId: string | null;
     customerId: string | null;
     email: string | null;
+  }>;
+  recentFailedIngestionJobs: Array<{
+    id: string;
+    jobType: string;
+    attempts: number;
+    errorMessage: string | null;
+    updatedAt: string | null;
   }>;
 }
 
@@ -323,15 +338,43 @@ function DiagnosticPageContent() {
 
             <Card>
               <CardHeader>
-                <CardTitle>Webhook Health</CardTitle>
-                <CardDescription>Attribution requires healthy orders/create webhook ingestion.</CardDescription>
+                <CardTitle>Webhook and Ingestion Health</CardTitle>
+                <CardDescription>Attribution requires healthy orders/create webhook ingestion and queue processing.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-2 text-sm">
                 <div>orders/create events 7d: {diagnostic.webhookHealth.ordersCreateEvents7d}</div>
                 <div>Last orders/create event: {diagnostic.webhookHealth.lastOrdersCreateEventAt ?? 'none'}</div>
+                <div>Pending ingestion jobs: {diagnostic.ingestionHealth.pendingJobs}</div>
+                <div>Processing ingestion jobs: {diagnostic.ingestionHealth.processingJobs}</div>
+                <div>Failed ingestion jobs: {diagnostic.ingestionHealth.failedJobs}</div>
+                <div>Processed ingestion jobs (7d): {diagnostic.ingestionHealth.processedJobs7d}</div>
+                <div>Last processed ingestion job: {diagnostic.ingestionHealth.lastProcessedAt ?? 'none'}</div>
+                <div>Last failed ingestion job: {diagnostic.ingestionHealth.lastFailedAt ?? 'none'}</div>
               </CardContent>
             </Card>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Recent Failed Ingestion Jobs</CardTitle>
+              <CardDescription>These failures block order insertion and therefore block attribution revenue updates.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(diagnostic.recentFailedIngestionJobs ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">No failed shopify_order_create ingestion jobs.</p>
+              ) : (
+                diagnostic.recentFailedIngestionJobs.map((job) => (
+                  <div key={job.id} className="rounded-lg border p-3 text-sm">
+                    <div className="font-medium">jobId={job.id}</div>
+                    <div>jobType={job.jobType}</div>
+                    <div>attempts={job.attempts}</div>
+                    <div>updatedAt={job.updatedAt ?? 'none'}</div>
+                    <div className="break-all">error={job.errorMessage ?? 'none'}</div>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
 
           <div className="grid gap-6 xl:grid-cols-2">
             <Card>
