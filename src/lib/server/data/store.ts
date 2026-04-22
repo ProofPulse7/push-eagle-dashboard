@@ -6855,6 +6855,7 @@ export const trackCampaignClick = async (input: TrackCampaignClickInput) => {
 export const trackAutomationClick = async (input: TrackAutomationClickInput) => {
   await ensureSchema();
   const sql = getNeonSql();
+  const normalizedExternalId = input.externalId?.trim() || null;
 
   const subscriberRows = input.externalId
     ? await sql`
@@ -6898,7 +6899,7 @@ export const trackAutomationClick = async (input: TrackAutomationClickInput) => 
       FROM automation_deliveries
       WHERE shop_domain = ${input.shopDomain}
         AND rule_key = ${input.ruleKey}
-        AND (${input.externalId ?? null} IS NULL OR external_id = ${input.externalId ?? null})
+        ${normalizedExternalId ? sql`AND external_id = ${normalizedExternalId}` : sql``}
         AND clicked_at IS NULL
       ORDER BY delivered_at DESC
       LIMIT 1
@@ -6914,41 +6915,88 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
   const occurredAt = input.occurredAt ? new Date(input.occurredAt) : new Date();
 
   const normalizedEmail = input.email?.trim().toLowerCase() ?? null;
+  const normalizedCustomerId = input.customerId?.trim() || null;
   const emailExternalId = normalizedEmail
     ? `email:${createHash('sha256').update(normalizedEmail).digest('hex').slice(0, 24)}`
     : null;
-  const customerExternalId = input.customerId?.trim() ? `shopify_customer:${input.customerId.trim()}` : null;
+  const customerExternalId = normalizedCustomerId ? `shopify_customer:${normalizedCustomerId}` : null;
 
-  const linkedExternalRows = (input.customerId || normalizedEmail)
-    ? await sql`
-      SELECT external_id
-      FROM shopify_customers
-      WHERE shop_domain = ${input.shopDomain}
-        AND external_id IS NOT NULL
-        AND (
-          (${input.customerId ?? null} IS NOT NULL AND customer_id = ${input.customerId ?? null})
-          OR (${normalizedEmail ?? null} IS NOT NULL AND LOWER(email) = ${normalizedEmail ?? null})
-        )
-      ORDER BY updated_at DESC
-      LIMIT 25
-    `
-    : [];
+  const linkedExternalRows = await (() => {
+    if (normalizedCustomerId && normalizedEmail) {
+      return sql`
+        SELECT external_id
+        FROM shopify_customers
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id IS NOT NULL
+          AND (customer_id = ${normalizedCustomerId} OR LOWER(email) = ${normalizedEmail})
+        ORDER BY updated_at DESC
+        LIMIT 25
+      `;
+    }
+    if (normalizedCustomerId) {
+      return sql`
+        SELECT external_id
+        FROM shopify_customers
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id IS NOT NULL
+          AND customer_id = ${normalizedCustomerId}
+        ORDER BY updated_at DESC
+        LIMIT 25
+      `;
+    }
+    if (normalizedEmail) {
+      return sql`
+        SELECT external_id
+        FROM shopify_customers
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id IS NOT NULL
+          AND LOWER(email) = ${normalizedEmail}
+        ORDER BY updated_at DESC
+        LIMIT 25
+      `;
+    }
+    return Promise.resolve([] as Array<{ external_id: string | null }>);
+  })();
 
-  const historicalOrderExternalRows = (input.customerId || normalizedEmail)
-    ? await sql`
-      SELECT external_id
-      FROM shopify_orders
-      WHERE shop_domain = ${input.shopDomain}
-        AND external_id IS NOT NULL
-        AND external_id <> ''
-        AND (
-          (${input.customerId ?? null} IS NOT NULL AND customer_id = ${input.customerId ?? null})
-          OR (${normalizedEmail ?? null} IS NOT NULL AND LOWER(email) = ${normalizedEmail ?? null})
-        )
-      ORDER BY created_at DESC
-      LIMIT 25
-    `
-    : [];
+  const historicalOrderExternalRows = await (() => {
+    if (normalizedCustomerId && normalizedEmail) {
+      return sql`
+        SELECT external_id
+        FROM shopify_orders
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id IS NOT NULL
+          AND external_id <> ''
+          AND (customer_id = ${normalizedCustomerId} OR LOWER(email) = ${normalizedEmail})
+        ORDER BY created_at DESC
+        LIMIT 25
+      `;
+    }
+    if (normalizedCustomerId) {
+      return sql`
+        SELECT external_id
+        FROM shopify_orders
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id IS NOT NULL
+          AND external_id <> ''
+          AND customer_id = ${normalizedCustomerId}
+        ORDER BY created_at DESC
+        LIMIT 25
+      `;
+    }
+    if (normalizedEmail) {
+      return sql`
+        SELECT external_id
+        FROM shopify_orders
+        WHERE shop_domain = ${input.shopDomain}
+          AND external_id IS NOT NULL
+          AND external_id <> ''
+          AND LOWER(email) = ${normalizedEmail}
+        ORDER BY created_at DESC
+        LIMIT 25
+      `;
+    }
+    return Promise.resolve([] as Array<{ external_id: string | null }>);
+  })();
 
   const cartExternalRows = input.cartToken
     ? await sql`
