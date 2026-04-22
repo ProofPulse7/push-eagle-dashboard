@@ -156,6 +156,7 @@ type RecordConversionInput = {
   campaignId?: string | null;
   customerId?: string | null;
   email?: string | null;
+  ipAddress?: string | null;
   userAgent?: string | null;
   platform?: string | null;
   browser?: string | null;
@@ -268,6 +269,7 @@ type OrderCreateIngestionPayload = {
   orderId: string;
   externalId?: string | null;
   cartToken?: string | null;
+  browserIp?: string | null;
   customerId?: string | null;
   email?: string | null;
   firstName?: string | null;
@@ -2625,8 +2627,26 @@ export const enqueueIngestionJob = async (input: {
     ON CONFLICT DO NOTHING
     RETURNING id
   `;
+  if (rows[0]) {
+    return String(rows[0].id);
+  }
 
-  return rows[0] ? String(rows[0].id) : null;
+  if (!input.dedupeKey) {
+    return null;
+  }
+
+  const existingRows = await sql`
+    SELECT id
+    FROM ingestion_jobs
+    WHERE shop_domain = ${input.shopDomain}
+      AND job_type = ${input.jobType}
+      AND dedupe_key = ${input.dedupeKey}
+      AND status IN ('pending', 'processing')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+
+  return existingRows[0] ? String(existingRows[0].id) : null;
 };
 
 export const listDueIngestionJobs = async (limit = 500, shardCount = 1, shardIndex = 0) => {
@@ -2744,6 +2764,7 @@ export const processIngestionJob = async (jobId: string) => {
         customerId: payload.customerId ?? null,
         email: payload.email ?? null,
         campaignId: getCampaignIdFromLandingSite(payload.landingSite),
+        ipAddress: payload.browserIp ?? null,
         userAgent: payload.userAgent ?? null,
         browser: payload.userAgent ?? null,
         country: null,
@@ -7001,6 +7022,27 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     table: 'automation_clicks' | 'automation_deliveries';
   };
 
+  const automationRuleKeyFromCampaign = (() => {
+    const value = String(input.campaignId ?? '').trim();
+    if (!value) {
+      return null;
+    }
+
+    const allowedRuleKeys = new Set<AutomationRuleKey>([
+      'welcome_subscriber',
+      'browse_abandonment_15m',
+      'cart_abandonment_30m',
+      'checkout_abandonment_30m',
+      'shipping_notifications',
+      'back_in_stock',
+      'price_drop',
+      'win_back_7d',
+      'post_purchase_followup',
+    ]);
+
+    return allowedRuleKeys.has(value as AutomationRuleKey) ? (value as AutomationRuleKey) : null;
+  })();
+
   const windowDays = settings.attributionModel === 'click'
     ? Math.max(1, settings.clickWindowDays)
     : Math.max(1, settings.impressionWindowDays);
@@ -7042,6 +7084,29 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
         table: 'automation_clicks' as const,
       }))
       : [];
+
+    if (automationTouches.length === 0 && automationRuleKeyFromCampaign && (input.ipAddress || input.userAgent)) {
+      const fallbackRows = await sql`
+        SELECT id, rule_key, clicked_at
+        FROM automation_clicks
+        WHERE shop_domain = ${input.shopDomain}
+          AND rule_key = ${automationRuleKeyFromCampaign}
+          AND clicked_at >= ${windowStart}
+          AND (
+            (${input.ipAddress ?? null} IS NOT NULL AND ip_address = ${input.ipAddress ?? null})
+            OR (${input.userAgent ?? null} IS NOT NULL AND user_agent = ${input.userAgent ?? null})
+          )
+        ORDER BY clicked_at DESC
+        LIMIT 10
+      `;
+
+      automationTouches = fallbackRows.map((row) => ({
+        id: Number(row.id),
+        ruleKey: String(row.rule_key),
+        touchedAt: new Date(String(row.clicked_at)),
+        table: 'automation_clicks' as const,
+      }));
+    }
   } else {
     const campaignClickTouches = externalIdCandidates.length > 0
       ? (await sql`
@@ -7131,6 +7196,31 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
 
     automationTouches = [...automationClickTouches, ...automationImpressionTouches]
       .sort((a, b) => b.touchedAt.getTime() - a.touchedAt.getTime());
+
+    if (automationTouches.length === 0 && automationRuleKeyFromCampaign && (input.ipAddress || input.userAgent)) {
+      const fallbackClickRows = await sql`
+        SELECT id, rule_key, clicked_at
+        FROM automation_clicks
+        WHERE shop_domain = ${input.shopDomain}
+          AND rule_key = ${automationRuleKeyFromCampaign}
+          AND clicked_at >= ${windowStart}
+          AND (
+            (${input.ipAddress ?? null} IS NOT NULL AND ip_address = ${input.ipAddress ?? null})
+            OR (${input.userAgent ?? null} IS NOT NULL AND user_agent = ${input.userAgent ?? null})
+          )
+        ORDER BY clicked_at DESC
+        LIMIT 10
+      `;
+
+      if (fallbackClickRows.length > 0) {
+        automationTouches = fallbackClickRows.map((row) => ({
+          id: Number(row.id),
+          ruleKey: String(row.rule_key),
+          touchedAt: new Date(String(row.clicked_at)),
+          table: 'automation_clicks' as const,
+        }));
+      }
+    }
   }
 
   const campaignById = new Map<string, CampaignTouch>();

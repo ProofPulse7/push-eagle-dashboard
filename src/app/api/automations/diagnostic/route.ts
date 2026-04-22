@@ -128,7 +128,9 @@ export async function GET(request: NextRequest) {
           COUNT(*) FILTER (WHERE status = 'pending')::INT AS pending_jobs,
           COUNT(*) FILTER (WHERE status = 'processing')::INT AS processing_jobs,
           COUNT(*) FILTER (WHERE status = 'failed')::INT AS failed_jobs,
+          COUNT(*) FILTER (WHERE status = 'pending' AND COALESCE(error_message, '') <> '')::INT AS pending_with_error_jobs,
           COUNT(*) FILTER (WHERE status = 'processed' AND processed_at >= NOW() - INTERVAL '7 days')::INT AS processed_jobs_7d,
+          MIN(updated_at) FILTER (WHERE status = 'pending') AS oldest_pending_at,
           MAX(processed_at) AS last_processed_at,
           MAX(updated_at) FILTER (WHERE status = 'failed') AS last_failed_at
         FROM ingestion_jobs
@@ -362,6 +364,12 @@ export async function GET(request: NextRequest) {
       lastFailedAt: ingestionRows[0]?.last_failed_at ? new Date(String(ingestionRows[0].last_failed_at)).toISOString() : null,
     };
 
+    const pendingWithErrorJobs = Number(ingestionRows[0]?.pending_with_error_jobs ?? 0);
+    const oldestPendingAt = ingestionRows[0]?.oldest_pending_at ? new Date(String(ingestionRows[0].oldest_pending_at)) : null;
+    const oldestPendingAgeMinutes = oldestPendingAt
+      ? Math.max(0, Math.floor((Date.now() - oldestPendingAt.getTime()) / 60000))
+      : null;
+
     const identityCoverage = {
       orders7d,
       withExternalId,
@@ -465,8 +473,26 @@ export async function GET(request: NextRequest) {
         component: 'AttributionIngestion',
         title: 'Order ingestion jobs are queued',
         description: 'Some order ingestion jobs are pending or processing; attribution metrics may lag until jobs complete.',
-        details: ingestionHealth,
+        details: {
+          ...ingestionHealth,
+          pendingWithErrorJobs,
+          oldestPendingAgeMinutes,
+        },
       });
+
+      if (pendingWithErrorJobs > 0 || (oldestPendingAgeMinutes !== null && oldestPendingAgeMinutes >= 2)) {
+        issues.push({
+          severity: 'warning',
+          component: 'AttributionIngestion',
+          title: 'Pending ingestion jobs look stalled',
+          description: 'At least one order ingestion job has been pending long enough to delay attribution and may be retrying after an internal error.',
+          details: {
+            ...ingestionHealth,
+            pendingWithErrorJobs,
+            oldestPendingAgeMinutes,
+          },
+        });
+      }
     } else {
       issues.push({
         severity: 'info',
@@ -516,6 +542,26 @@ export async function GET(request: NextRequest) {
           welcomeTouchIdentityDebug,
         },
       });
+
+      const unattributedHasCustomerNamespace = recentUnattributedOrders.some((order) =>
+        String(order.externalId ?? '').startsWith('shopify_customer:'),
+      );
+      const welcomeHasAnonNamespace =
+        welcomeTouchIdentityDebug.recentClickExternalIds.some((externalId) => externalId.startsWith('anon:'))
+        || welcomeTouchIdentityDebug.recentDeliveryExternalIds.some((externalId) => externalId.startsWith('anon:'));
+
+      if (unattributedHasCustomerNamespace && welcomeHasAnonNamespace) {
+        issues.push({
+          severity: 'warning',
+          component: 'IdentityResolution',
+          title: 'Core mismatch detected: order identity and welcome touch identity use different namespaces',
+          description: 'Recent unattributed orders are customer-based while welcome touches are anonymous, so attribution depends on alias stitching or browser-level matching.',
+          details: {
+            sampleUnattributedOrders: recentUnattributedOrders.slice(0, 5),
+            welcomeTouchIdentityDebug,
+          },
+        });
+      }
     }
 
     if (missingAllIdentity > 0) {

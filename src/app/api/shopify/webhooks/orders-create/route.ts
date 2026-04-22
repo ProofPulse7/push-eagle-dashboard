@@ -146,6 +146,7 @@ export async function POST(request: Request) {
           collectionHint: item.product_type ?? item.vendor ?? null,
         })),
         landingSite: payload.landing_site ?? null,
+        browserIp: payload.client_details?.browser_ip ?? payload.browser_ip ?? null,
         userAgent: payload.client_details?.user_agent ?? request.headers.get('user-agent'),
       },
     });
@@ -166,6 +167,7 @@ export async function POST(request: Request) {
       jobId,
       processedNow,
       processingError,
+      cartToken: cartTokenFromNotes,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to process order webhook.';
