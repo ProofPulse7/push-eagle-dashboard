@@ -81,6 +81,14 @@ type DiagnosticResult = {
     errorMessage: string | null;
     updatedAt: string | null;
   }>;
+  recentPendingIngestionJobs: Array<{
+    id: string;
+    jobType: string;
+    attempts: number;
+    errorMessage: string | null;
+    dueAt: string | null;
+    updatedAt: string | null;
+  }>;
   welcomeTouchIdentityDebug: {
     recentClickExternalIds: string[];
     recentDeliveryExternalIds: string[];
@@ -104,6 +112,7 @@ export async function GET(request: NextRequest) {
       webhookRows,
       ingestionRows,
       failedIngestionRows,
+      pendingIngestionRows,
       ordersRows,
       attributedOrderRows,
       identityRows,
@@ -143,6 +152,15 @@ export async function GET(request: NextRequest) {
         WHERE shop_domain = ${shopDomain}
           AND job_type = 'shopify_order_create'
           AND status = 'failed'
+        ORDER BY updated_at DESC
+        LIMIT 20
+      `,
+      sql`
+        SELECT id, job_type, attempts, error_message, due_at, updated_at
+        FROM ingestion_jobs
+        WHERE shop_domain = ${shopDomain}
+          AND job_type = 'shopify_order_create'
+          AND status = 'pending'
         ORDER BY updated_at DESC
         LIMIT 20
       `,
@@ -403,6 +421,15 @@ export async function GET(request: NextRequest) {
       updatedAt: row.updated_at ? new Date(String(row.updated_at)).toISOString() : null,
     }));
 
+    const recentPendingIngestionJobs = (pendingIngestionRows as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id ?? ''),
+      jobType: String(row.job_type ?? ''),
+      attempts: Number(row.attempts ?? 0),
+      errorMessage: row.error_message ? String(row.error_message) : null,
+      dueAt: row.due_at ? new Date(String(row.due_at)).toISOString() : null,
+      updatedAt: row.updated_at ? new Date(String(row.updated_at)).toISOString() : null,
+    }));
+
     const welcomeTouchIdentityDebug: DiagnosticResult['welcomeTouchIdentityDebug'] = {
       recentClickExternalIds: Array.from(
         new Set(
@@ -477,6 +504,7 @@ export async function GET(request: NextRequest) {
           ...ingestionHealth,
           pendingWithErrorJobs,
           oldestPendingAgeMinutes,
+          recentPendingIngestionJobs: recentPendingIngestionJobs.slice(0, 5),
         },
       });
 
@@ -490,6 +518,7 @@ export async function GET(request: NextRequest) {
             ...ingestionHealth,
             pendingWithErrorJobs,
             oldestPendingAgeMinutes,
+            recentPendingIngestionJobs: recentPendingIngestionJobs.slice(0, 5),
           },
         });
       }
@@ -611,6 +640,7 @@ export async function GET(request: NextRequest) {
       recentAttributedTouches,
       recentUnattributedOrders,
       recentFailedIngestionJobs,
+      recentPendingIngestionJobs,
       welcomeTouchIdentityDebug,
     } satisfies DiagnosticResult);
   } catch (error) {
@@ -671,6 +701,7 @@ export async function GET(request: NextRequest) {
         recentAttributedTouches: [],
         recentUnattributedOrders: [],
         recentFailedIngestionJobs: [],
+        recentPendingIngestionJobs: [],
         welcomeTouchIdentityDebug: {
           recentClickExternalIds: [],
           recentDeliveryExternalIds: [],

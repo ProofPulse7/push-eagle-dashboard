@@ -87,6 +87,14 @@ interface DiagnosticResult {
     errorMessage: string | null;
     updatedAt: string | null;
   }>;
+  recentPendingIngestionJobs: Array<{
+    id: string;
+    jobType: string;
+    attempts: number;
+    errorMessage: string | null;
+    dueAt: string | null;
+    updatedAt: string | null;
+  }>;
   welcomeTouchIdentityDebug: {
     recentClickExternalIds: string[];
     recentDeliveryExternalIds: string[];
@@ -442,6 +450,29 @@ function DiagnosticPageContent() {
                     <div className="font-medium">jobId={job.id}</div>
                     <div>jobType={job.jobType}</div>
                     <div>attempts={job.attempts}</div>
+                    <div>updatedAt={job.updatedAt ?? 'none'}</div>
+                    <div className="break-all">error={job.errorMessage ?? 'none'}</div>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Recent Pending Ingestion Jobs</CardTitle>
+              <CardDescription>Pending jobs with error messages explain why attribution is delayed or retried.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(diagnostic.recentPendingIngestionJobs ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">No pending shopify_order_create ingestion jobs.</p>
+              ) : (
+                diagnostic.recentPendingIngestionJobs.map((job) => (
+                  <div key={job.id} className="rounded-lg border p-3 text-sm">
+                    <div className="font-medium">jobId={job.id}</div>
+                    <div>jobType={job.jobType}</div>
+                    <div>attempts={job.attempts}</div>
+                    <div>dueAt={job.dueAt ?? 'none'}</div>
                     <div>updatedAt={job.updatedAt ?? 'none'}</div>
                     <div className="break-all">error={job.errorMessage ?? 'none'}</div>
                   </div>

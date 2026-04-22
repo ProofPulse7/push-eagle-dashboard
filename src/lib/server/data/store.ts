@@ -7043,6 +7043,47 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     return allowedRuleKeys.has(value as AutomationRuleKey) ? (value as AutomationRuleKey) : null;
   })();
 
+  const fetchAutomationFingerprintFallback = async (ruleKey?: AutomationRuleKey | null) => {
+    if (!input.ipAddress && !input.userAgent) {
+      return [] as AutomationTouch[];
+    }
+
+    const rows = await sql`
+      SELECT id, rule_key, clicked_at
+      FROM automation_clicks
+      WHERE shop_domain = ${input.shopDomain}
+        AND clicked_at >= ${windowStart}
+        AND (${ruleKey ?? null} IS NULL OR rule_key = ${ruleKey ?? null})
+        AND (
+          (
+            ${input.ipAddress ?? null} IS NOT NULL
+            AND ${input.userAgent ?? null} IS NOT NULL
+            AND ip_address = ${input.ipAddress ?? null}
+            AND user_agent = ${input.userAgent ?? null}
+          )
+          OR (
+            ${input.ipAddress ?? null} IS NOT NULL
+            AND ${input.userAgent ?? null} IS NULL
+            AND ip_address = ${input.ipAddress ?? null}
+          )
+          OR (
+            ${input.ipAddress ?? null} IS NULL
+            AND ${input.userAgent ?? null} IS NOT NULL
+            AND user_agent = ${input.userAgent ?? null}
+          )
+        )
+      ORDER BY clicked_at DESC
+      LIMIT 20
+    `;
+
+    return rows.map((row) => ({
+      id: Number(row.id),
+      ruleKey: String(row.rule_key),
+      touchedAt: new Date(String(row.clicked_at)),
+      table: 'automation_clicks' as const,
+    }));
+  };
+
   const windowDays = settings.attributionModel === 'click'
     ? Math.max(1, settings.clickWindowDays)
     : Math.max(1, settings.impressionWindowDays);
@@ -7085,27 +7126,13 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
       }))
       : [];
 
-    if (automationTouches.length === 0 && automationRuleKeyFromCampaign && (input.ipAddress || input.userAgent)) {
-      const fallbackRows = await sql`
-        SELECT id, rule_key, clicked_at
-        FROM automation_clicks
-        WHERE shop_domain = ${input.shopDomain}
-          AND rule_key = ${automationRuleKeyFromCampaign}
-          AND clicked_at >= ${windowStart}
-          AND (
-            (${input.ipAddress ?? null} IS NOT NULL AND ip_address = ${input.ipAddress ?? null})
-            OR (${input.userAgent ?? null} IS NOT NULL AND user_agent = ${input.userAgent ?? null})
-          )
-        ORDER BY clicked_at DESC
-        LIMIT 10
-      `;
-
-      automationTouches = fallbackRows.map((row) => ({
-        id: Number(row.id),
-        ruleKey: String(row.rule_key),
-        touchedAt: new Date(String(row.clicked_at)),
-        table: 'automation_clicks' as const,
-      }));
+    if (automationTouches.length === 0) {
+      if (automationRuleKeyFromCampaign) {
+        automationTouches = await fetchAutomationFingerprintFallback(automationRuleKeyFromCampaign);
+      }
+      if (automationTouches.length === 0) {
+        automationTouches = await fetchAutomationFingerprintFallback();
+      }
     }
   } else {
     const campaignClickTouches = externalIdCandidates.length > 0
@@ -7197,28 +7224,12 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     automationTouches = [...automationClickTouches, ...automationImpressionTouches]
       .sort((a, b) => b.touchedAt.getTime() - a.touchedAt.getTime());
 
-    if (automationTouches.length === 0 && automationRuleKeyFromCampaign && (input.ipAddress || input.userAgent)) {
-      const fallbackClickRows = await sql`
-        SELECT id, rule_key, clicked_at
-        FROM automation_clicks
-        WHERE shop_domain = ${input.shopDomain}
-          AND rule_key = ${automationRuleKeyFromCampaign}
-          AND clicked_at >= ${windowStart}
-          AND (
-            (${input.ipAddress ?? null} IS NOT NULL AND ip_address = ${input.ipAddress ?? null})
-            OR (${input.userAgent ?? null} IS NOT NULL AND user_agent = ${input.userAgent ?? null})
-          )
-        ORDER BY clicked_at DESC
-        LIMIT 10
-      `;
-
-      if (fallbackClickRows.length > 0) {
-        automationTouches = fallbackClickRows.map((row) => ({
-          id: Number(row.id),
-          ruleKey: String(row.rule_key),
-          touchedAt: new Date(String(row.clicked_at)),
-          table: 'automation_clicks' as const,
-        }));
+    if (automationTouches.length === 0) {
+      if (automationRuleKeyFromCampaign) {
+        automationTouches = await fetchAutomationFingerprintFallback(automationRuleKeyFromCampaign);
+      }
+      if (automationTouches.length === 0) {
+        automationTouches = await fetchAutomationFingerprintFallback();
       }
     }
   }
