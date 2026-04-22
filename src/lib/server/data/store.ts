@@ -7092,37 +7092,81 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
   })();
 
   const fetchAutomationFingerprintFallback = async (ruleKey?: AutomationRuleKey | null) => {
-    if (!input.ipAddress && !input.userAgent) {
+    const ipAddress = input.ipAddress?.trim() || null;
+    const userAgent = input.userAgent?.trim() || null;
+
+    if (!ipAddress && !userAgent) {
       return [] as AutomationTouch[];
     }
 
-    const rows = await sql`
-      SELECT id, rule_key, clicked_at
-      FROM automation_clicks
-      WHERE shop_domain = ${input.shopDomain}
-        AND clicked_at >= ${windowStart}
-        AND (${ruleKey ?? null}::text IS NULL OR rule_key = ${ruleKey ?? null}::text)
-        AND (
-          (
-            ${input.ipAddress ?? null}::text IS NOT NULL
-            AND ${input.userAgent ?? null}::text IS NOT NULL
-            AND ip_address = ${input.ipAddress ?? null}::text
-            AND user_agent = ${input.userAgent ?? null}::text
-          )
-          OR (
-            ${input.ipAddress ?? null}::text IS NOT NULL
-            AND ${input.userAgent ?? null}::text IS NULL
-            AND ip_address = ${input.ipAddress ?? null}::text
-          )
-          OR (
-            ${input.ipAddress ?? null}::text IS NULL
-            AND ${input.userAgent ?? null}::text IS NOT NULL
-            AND user_agent = ${input.userAgent ?? null}::text
-          )
-        )
-      ORDER BY clicked_at DESC
-      LIMIT 20
-    `;
+    let rows: Array<{ id: number | string; rule_key: string; clicked_at: string | Date }> = [];
+
+    if (ipAddress && userAgent) {
+      rows = ruleKey
+        ? await sql`
+          SELECT id, rule_key, clicked_at
+          FROM automation_clicks
+          WHERE shop_domain = ${input.shopDomain}
+            AND clicked_at >= ${windowStart}
+            AND rule_key = ${ruleKey}
+            AND ip_address = ${ipAddress}
+            AND user_agent = ${userAgent}
+          ORDER BY clicked_at DESC
+          LIMIT 20
+        ` as Array<{ id: number | string; rule_key: string; clicked_at: string | Date }>
+        : await sql`
+          SELECT id, rule_key, clicked_at
+          FROM automation_clicks
+          WHERE shop_domain = ${input.shopDomain}
+            AND clicked_at >= ${windowStart}
+            AND ip_address = ${ipAddress}
+            AND user_agent = ${userAgent}
+          ORDER BY clicked_at DESC
+          LIMIT 20
+        ` as Array<{ id: number | string; rule_key: string; clicked_at: string | Date }>;
+    } else if (ipAddress) {
+      rows = ruleKey
+        ? await sql`
+          SELECT id, rule_key, clicked_at
+          FROM automation_clicks
+          WHERE shop_domain = ${input.shopDomain}
+            AND clicked_at >= ${windowStart}
+            AND rule_key = ${ruleKey}
+            AND ip_address = ${ipAddress}
+          ORDER BY clicked_at DESC
+          LIMIT 20
+        ` as Array<{ id: number | string; rule_key: string; clicked_at: string | Date }>
+        : await sql`
+          SELECT id, rule_key, clicked_at
+          FROM automation_clicks
+          WHERE shop_domain = ${input.shopDomain}
+            AND clicked_at >= ${windowStart}
+            AND ip_address = ${ipAddress}
+          ORDER BY clicked_at DESC
+          LIMIT 20
+        ` as Array<{ id: number | string; rule_key: string; clicked_at: string | Date }>;
+    } else if (userAgent) {
+      rows = ruleKey
+        ? await sql`
+          SELECT id, rule_key, clicked_at
+          FROM automation_clicks
+          WHERE shop_domain = ${input.shopDomain}
+            AND clicked_at >= ${windowStart}
+            AND rule_key = ${ruleKey}
+            AND user_agent = ${userAgent}
+          ORDER BY clicked_at DESC
+          LIMIT 20
+        ` as Array<{ id: number | string; rule_key: string; clicked_at: string | Date }>
+        : await sql`
+          SELECT id, rule_key, clicked_at
+          FROM automation_clicks
+          WHERE shop_domain = ${input.shopDomain}
+            AND clicked_at >= ${windowStart}
+            AND user_agent = ${userAgent}
+          ORDER BY clicked_at DESC
+          LIMIT 20
+        ` as Array<{ id: number | string; rule_key: string; clicked_at: string | Date }>;
+    }
 
     return rows.map((row) => ({
       id: Number(row.id),
