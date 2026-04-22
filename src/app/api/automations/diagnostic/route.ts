@@ -93,6 +93,33 @@ type DiagnosticResult = {
     recentClickExternalIds: string[];
     recentDeliveryExternalIds: string[];
   };
+  pendingJobDebug?: Array<{
+    jobId: string;
+    orderData: {
+      orderId: string | null;
+      externalId: string | null;
+      customerId: string | null;
+      email: string | null;
+      browserIp: string | null;
+      userAgent: string | null;
+      cartToken: string | null;
+    };
+  }>;
+  automationClicksDebug?: Array<{
+    clickId: string;
+    externalId: string;
+    ipAddress: string;
+    userAgent: string;
+    clickedAt: string | null;
+  }>;
+  unattributedOrdersDebug?: Array<{
+    orderId: string;
+    externalId: string;
+    customerId: string;
+    email: string;
+    createdAt: string | null;
+    totalPriceCents: number;
+  }>;
 };
 
 const round2 = (value: number) => Math.round(value * 100) / 100;
@@ -123,6 +150,9 @@ export async function GET(request: NextRequest) {
       welcomeExternalRows,
       attributedTouchRows,
       unattributedRows,
+      pendingJobPayloadsRows,
+      automationClicksFingerprintRows,
+      unattributedOrderContextRows,
     ] = await Promise.all([
       sql`
         SELECT
@@ -347,6 +377,32 @@ export async function GET(request: NextRequest) {
         ORDER BY o.created_at DESC
         LIMIT 20
       `,
+      sql`
+        SELECT id, payload
+        FROM ingestion_jobs
+        WHERE shop_domain = ${shopDomain}
+          AND job_type = 'shopify_order_create'
+          AND status = 'pending'
+        ORDER BY updated_at DESC
+        LIMIT 5
+      `,
+      sql`
+        SELECT id, rule_key, ip_address, user_agent, external_id, clicked_at
+        FROM automation_clicks
+        WHERE shop_domain = ${shopDomain}
+          AND rule_key = 'welcome_subscriber'
+          AND clicked_at >= NOW() - INTERVAL '7 days'
+        ORDER BY clicked_at DESC
+        LIMIT 20
+      `,
+      sql`
+        SELECT order_id, external_id, customer_id, email, created_at, total_price_cents
+        FROM shopify_orders
+        WHERE shop_domain = ${shopDomain}
+          AND created_at >= NOW() - INTERVAL '7 days'
+        ORDER BY created_at DESC
+        LIMIT 5
+      `,
     ]);
 
     const orders7d = Number(ordersRows[0]?.orders_7d ?? 0);
@@ -448,6 +504,40 @@ export async function GET(request: NextRequest) {
         ),
       ).slice(0, 20),
     };
+
+    // Deep diagnostics: analyze pending job payloads and fingerprint matching
+    const pendingJobDebug = (pendingJobPayloadsRows as Array<Record<string, unknown>>).map((row) => {
+      const payload = row.payload as Record<string, unknown> | null;
+      return {
+        jobId: String(row.id ?? ''),
+        orderData: {
+          orderId: payload?.orderId ? String(payload.orderId) : null,
+          externalId: payload?.externalId ? String(payload.externalId) : null,
+          customerId: payload?.customerId ? String(payload.customerId) : null,
+          email: payload?.email ? String(payload.email) : null,
+          browserIp: payload?.browserIp ? String(payload.browserIp) : null,
+          userAgent: payload?.userAgent ? String(payload.userAgent) : null,
+          cartToken: payload?.cartToken ? String(payload.cartToken) : null,
+        },
+      };
+    });
+
+    const automationClicksDebug = (automationClicksFingerprintRows as Array<Record<string, unknown>>).map((row) => ({
+      clickId: String(row.id ?? ''),
+      externalId: String(row.external_id ?? ''),
+      ipAddress: String(row.ip_address ?? ''),
+      userAgent: String(row.user_agent ?? ''),
+      clickedAt: row.clicked_at ? new Date(String(row.clicked_at)).toISOString() : null,
+    }));
+
+    const unattributedOrdersDebug = (unattributedOrderContextRows as Array<Record<string, unknown>>).map((row) => ({
+      orderId: String(row.order_id ?? ''),
+      externalId: String(row.external_id ?? ''),
+      customerId: String(row.customer_id ?? ''),
+      email: String(row.email ?? ''),
+      createdAt: row.created_at ? new Date(String(row.created_at)).toISOString() : null,
+      totalPriceCents: Number(row.total_price_cents ?? 0),
+    }));
 
     const attributionSummary: DiagnosticResult['attributionSummary'] = {
       orders7d,
@@ -642,6 +732,9 @@ export async function GET(request: NextRequest) {
       recentFailedIngestionJobs,
       recentPendingIngestionJobs,
       welcomeTouchIdentityDebug,
+      pendingJobDebug,
+      automationClicksDebug,
+      unattributedOrdersDebug,
     } satisfies DiagnosticResult);
   } catch (error) {
     return NextResponse.json(
