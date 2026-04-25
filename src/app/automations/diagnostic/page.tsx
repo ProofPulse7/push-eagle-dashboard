@@ -58,12 +58,38 @@ interface DiagnosticResult {
     lastProcessedAt: string | null;
     lastFailedAt: string | null;
   };
+  automationQueueHealth?: {
+    pendingJobs: number;
+    processingJobs: number;
+    failedJobs: number;
+    dueNowJobs: number;
+    overdueBy5Minutes: number;
+    oldestDueAt: string | null;
+    oldestDueAgeMinutes: number | null;
+    welcomePendingJobs: number;
+    welcomeDueNowJobs: number;
+  };
   identityCoverage: {
     orders7d: number;
     withExternalId: number;
     withCustomerId: number;
     withEmail: number;
     missingAllIdentity: number;
+  };
+  impressionCoverageDebug?: {
+    welcomeDeliveries7d: number;
+    welcomeDeliveriesWithExternalId7d: number;
+    welcomeDeliveriesWithUserAgent7d: number;
+    welcomeDeliveriesMissingExternalId7d: number;
+    welcomeDeliveriesMissingUserAgent7d: number;
+    welcomeClicksWithIpAndUserAgent7d: number;
+  };
+  orderIdentityNamespaceDebug?: {
+    cartNamespaceOrders7d: number;
+    customerNamespaceOrders7d: number;
+    emailNamespaceOrders7d: number;
+    anonNamespaceOrders7d: number;
+    otherNamespaceOrders7d: number;
   };
   recentAttributedTouches: Array<{
     sourceType: 'campaign_click' | 'campaign_impression' | 'automation_click' | 'automation_impression';
@@ -99,6 +125,72 @@ interface DiagnosticResult {
     recentClickExternalIds: string[];
     recentDeliveryExternalIds: string[];
   };
+  welcomeReminderDiagnostics?: {
+    checkedAt: string;
+    summary: {
+      reminder2: {
+        pending: number;
+        dueNow: number;
+        sent: number;
+        failed: number;
+        skipped: number;
+        processing: number;
+        delivered: number;
+        lastDeliveredAt: string | null;
+      };
+      reminder3: {
+        pending: number;
+        dueNow: number;
+        sent: number;
+        failed: number;
+        skipped: number;
+        processing: number;
+        delivered: number;
+        lastDeliveredAt: string | null;
+      };
+      staleProcessing: number;
+    };
+    stepConfig: {
+      reminder2: {
+        enabled: boolean;
+        delayMinutes: number;
+      };
+      reminder3: {
+        enabled: boolean;
+        delayMinutes: number;
+      };
+    };
+    sendLagDiagnostics: {
+      reminder2: {
+        sampleCount: number;
+        averageLagMinutes: number | null;
+        maxLagMinutes: number | null;
+      };
+      reminder3: {
+        sampleCount: number;
+        averageLagMinutes: number | null;
+        maxLagMinutes: number | null;
+      };
+    };
+    inferredIssues: string[];
+  };
+  automationDeliveriesDebug?: Array<{
+    deliveryId: string;
+    externalId: string;
+    userAgent: string;
+    deliveredAt: string | null;
+    convertedAt: string | null;
+    orderId: string | null;
+  }>;
+  unattributedOrderBridgeDebug?: Array<{
+    orderId: string;
+    externalId: string | null;
+    derivedCartToken: string | null;
+    sameExternalClickMatches: number;
+    sameExternalDeliveryMatches: number;
+    cartActivityMatches: number;
+    historicalCustomerExternalMatches: number;
+  }>;
 }
 
 const formatMoney = (cents: number) => {
@@ -338,6 +430,59 @@ function DiagnosticPageContent() {
 
           <Card>
             <CardHeader>
+              <CardTitle>Welcome Reminder Delay Diagnostics</CardTitle>
+              <CardDescription>Verifies reminder-2/reminder-3 queue health, configured delays, and observed send lag.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4 text-sm">
+              {!diagnostic.welcomeReminderDiagnostics ? (
+                <p className="text-muted-foreground">No reminder diagnostics were returned.</p>
+              ) : (
+                <>
+                  <div>Checked at: {new Date(diagnostic.welcomeReminderDiagnostics.checkedAt).toLocaleString()}</div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="rounded-lg border p-3">
+                      <div className="font-medium">Reminder 2</div>
+                      <div>Configured delay: {diagnostic.welcomeReminderDiagnostics.stepConfig.reminder2.delayMinutes} minute(s)</div>
+                      <div>Enabled: {diagnostic.welcomeReminderDiagnostics.stepConfig.reminder2.enabled ? 'yes' : 'no'}</div>
+                      <div>Pending: {diagnostic.welcomeReminderDiagnostics.summary.reminder2.pending}</div>
+                      <div>Due now: {diagnostic.welcomeReminderDiagnostics.summary.reminder2.dueNow}</div>
+                      <div>Sent: {diagnostic.welcomeReminderDiagnostics.summary.reminder2.sent}</div>
+                      <div>Delivered: {diagnostic.welcomeReminderDiagnostics.summary.reminder2.delivered}</div>
+                      <div>Average lag: {diagnostic.welcomeReminderDiagnostics.sendLagDiagnostics.reminder2.averageLagMinutes ?? 'n/a'} minute(s)</div>
+                      <div>Max lag: {diagnostic.welcomeReminderDiagnostics.sendLagDiagnostics.reminder2.maxLagMinutes ?? 'n/a'} minute(s)</div>
+                      <div>Lag samples: {diagnostic.welcomeReminderDiagnostics.sendLagDiagnostics.reminder2.sampleCount}</div>
+                    </div>
+                    <div className="rounded-lg border p-3">
+                      <div className="font-medium">Reminder 3</div>
+                      <div>Configured delay: {diagnostic.welcomeReminderDiagnostics.stepConfig.reminder3.delayMinutes} minute(s)</div>
+                      <div>Enabled: {diagnostic.welcomeReminderDiagnostics.stepConfig.reminder3.enabled ? 'yes' : 'no'}</div>
+                      <div>Pending: {diagnostic.welcomeReminderDiagnostics.summary.reminder3.pending}</div>
+                      <div>Due now: {diagnostic.welcomeReminderDiagnostics.summary.reminder3.dueNow}</div>
+                      <div>Sent: {diagnostic.welcomeReminderDiagnostics.summary.reminder3.sent}</div>
+                      <div>Delivered: {diagnostic.welcomeReminderDiagnostics.summary.reminder3.delivered}</div>
+                      <div>Average lag: {diagnostic.welcomeReminderDiagnostics.sendLagDiagnostics.reminder3.averageLagMinutes ?? 'n/a'} minute(s)</div>
+                      <div>Max lag: {diagnostic.welcomeReminderDiagnostics.sendLagDiagnostics.reminder3.maxLagMinutes ?? 'n/a'} minute(s)</div>
+                      <div>Lag samples: {diagnostic.welcomeReminderDiagnostics.sendLagDiagnostics.reminder3.sampleCount}</div>
+                    </div>
+                  </div>
+                  <div>Stale processing jobs (&gt;10 minutes): {diagnostic.welcomeReminderDiagnostics.summary.staleProcessing}</div>
+                  {(diagnostic.welcomeReminderDiagnostics.inferredIssues ?? []).length > 0 && (
+                    <div className="rounded-lg border p-3">
+                      <div className="font-medium">Detected issues</div>
+                      <ul className="mt-2 list-disc pl-5 space-y-1">
+                        {diagnostic.welcomeReminderDiagnostics.inferredIssues.map((issue, index) => (
+                          <li key={`${issue}-${index}`}>{issue}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
               <CardTitle>Attribution Settings Snapshot</CardTitle>
               <CardDescription>These settings directly affect revenue assignment logic.</CardDescription>
             </CardHeader>
@@ -436,6 +581,55 @@ function DiagnosticPageContent() {
             </Card>
           </div>
 
+          <div className="grid gap-6 xl:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Automation Queue Health</CardTitle>
+                <CardDescription>Shows whether delayed automation jobs are actually waiting overdue in the queue.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                <div>Pending jobs: {diagnostic.automationQueueHealth?.pendingJobs ?? 0}</div>
+                <div>Processing jobs: {diagnostic.automationQueueHealth?.processingJobs ?? 0}</div>
+                <div>Failed jobs: {diagnostic.automationQueueHealth?.failedJobs ?? 0}</div>
+                <div>Due now: {diagnostic.automationQueueHealth?.dueNowJobs ?? 0}</div>
+                <div>Overdue by 5+ minutes: {diagnostic.automationQueueHealth?.overdueBy5Minutes ?? 0}</div>
+                <div>Oldest due at: {diagnostic.automationQueueHealth?.oldestDueAt ?? 'none'}</div>
+                <div>Oldest due age: {diagnostic.automationQueueHealth?.oldestDueAgeMinutes ?? 'n/a'} minute(s)</div>
+                <div>Welcome pending jobs: {diagnostic.automationQueueHealth?.welcomePendingJobs ?? 0}</div>
+                <div>Welcome due now: {diagnostic.automationQueueHealth?.welcomeDueNowJobs ?? 0}</div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Impression Coverage</CardTitle>
+                <CardDescription>Checks whether recent welcome deliveries include the fields needed for impression attribution fallback.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                <div>Welcome deliveries 7d: {diagnostic.impressionCoverageDebug?.welcomeDeliveries7d ?? 0}</div>
+                <div>Deliveries with externalId: {diagnostic.impressionCoverageDebug?.welcomeDeliveriesWithExternalId7d ?? 0}</div>
+                <div>Deliveries with userAgent: {diagnostic.impressionCoverageDebug?.welcomeDeliveriesWithUserAgent7d ?? 0}</div>
+                <div>Missing externalId: {diagnostic.impressionCoverageDebug?.welcomeDeliveriesMissingExternalId7d ?? 0}</div>
+                <div>Missing userAgent: {diagnostic.impressionCoverageDebug?.welcomeDeliveriesMissingUserAgent7d ?? 0}</div>
+                <div>Clicks with IP + userAgent: {diagnostic.impressionCoverageDebug?.welcomeClicksWithIpAndUserAgent7d ?? 0}</div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Order Identity Namespaces</CardTitle>
+              <CardDescription>Shows which identity namespace recent Shopify orders are landing in.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 text-sm md:grid-cols-2 xl:grid-cols-5">
+              <div className="rounded-lg border p-3">Cart namespace: {diagnostic.orderIdentityNamespaceDebug?.cartNamespaceOrders7d ?? 0}</div>
+              <div className="rounded-lg border p-3">Customer namespace: {diagnostic.orderIdentityNamespaceDebug?.customerNamespaceOrders7d ?? 0}</div>
+              <div className="rounded-lg border p-3">Email namespace: {diagnostic.orderIdentityNamespaceDebug?.emailNamespaceOrders7d ?? 0}</div>
+              <div className="rounded-lg border p-3">Anon namespace: {diagnostic.orderIdentityNamespaceDebug?.anonNamespaceOrders7d ?? 0}</div>
+              <div className="rounded-lg border p-3">Other namespace: {diagnostic.orderIdentityNamespaceDebug?.otherNamespaceOrders7d ?? 0}</div>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>Recent Failed Ingestion Jobs</CardTitle>
@@ -520,6 +714,55 @@ function DiagnosticPageContent() {
                       <div>externalId={order.externalId ?? 'none'}</div>
                       <div>customerId={order.customerId ?? 'none'}</div>
                       <div>email={order.email ?? 'none'}</div>
+                    </div>
+                  ))
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid gap-6 xl:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Recent Welcome Delivery Debug</CardTitle>
+                <CardDescription>Confirms whether delivered welcome rows carry the identity/fingerprint data impression attribution needs.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {(diagnostic.automationDeliveriesDebug ?? []).length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No recent welcome delivery debug rows.</p>
+                ) : (
+                  (diagnostic.automationDeliveriesDebug ?? []).map((delivery) => (
+                    <div key={delivery.deliveryId} className="rounded-lg border p-3 text-sm">
+                      <div className="font-medium">deliveryId={delivery.deliveryId}</div>
+                      <div>externalId={delivery.externalId || 'none'}</div>
+                      <div>userAgent={delivery.userAgent || 'none'}</div>
+                      <div>deliveredAt={delivery.deliveredAt ?? 'none'}</div>
+                      <div>convertedAt={delivery.convertedAt ?? 'none'}</div>
+                      <div>orderId={delivery.orderId ?? 'none'}</div>
+                    </div>
+                  ))
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Unattributed Order Bridge Debug</CardTitle>
+                <CardDescription>Shows whether recent unattributed orders have nearby bridge candidates through cart, same externalId, or historical customer identity.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {(diagnostic.unattributedOrderBridgeDebug ?? []).length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No unattributed order bridge debug rows.</p>
+                ) : (
+                  (diagnostic.unattributedOrderBridgeDebug ?? []).map((order) => (
+                    <div key={order.orderId} className="rounded-lg border p-3 text-sm">
+                      <div className="font-medium">orderId={order.orderId}</div>
+                      <div>externalId={order.externalId ?? 'none'}</div>
+                      <div>derivedCartToken={order.derivedCartToken ?? 'none'}</div>
+                      <div>sameExternalClickMatches={order.sameExternalClickMatches}</div>
+                      <div>sameExternalDeliveryMatches={order.sameExternalDeliveryMatches}</div>
+                      <div>cartActivityMatches={order.cartActivityMatches}</div>
+                      <div>historicalCustomerExternalMatches={order.historicalCustomerExternalMatches}</div>
                     </div>
                   ))
                 )}

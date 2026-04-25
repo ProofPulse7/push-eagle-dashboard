@@ -692,10 +692,14 @@ const ensureSchema = async () => {
         fcm_message_id TEXT,
         delivered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         clicked_at TIMESTAMPTZ,
+        user_agent TEXT,
+        ip_address TEXT,
         converted_at TIMESTAMPTZ,
         order_id TEXT,
         revenue_cents INTEGER NOT NULL DEFAULT 0
       )`;
+      await sql`ALTER TABLE automation_deliveries ADD COLUMN IF NOT EXISTS user_agent TEXT`;
+      await sql`ALTER TABLE automation_deliveries ADD COLUMN IF NOT EXISTS ip_address TEXT`;
 
       await sql`CREATE TABLE IF NOT EXISTS automation_clicks (
         id BIGSERIAL PRIMARY KEY,
@@ -944,6 +948,7 @@ const ensureSchema = async () => {
       await sql`CREATE INDEX IF NOT EXISTS idx_campaign_clicks_shop_subscriber ON campaign_clicks(shop_domain, subscriber_id, clicked_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_automation_deliveries_shop_rule_time ON automation_deliveries(shop_domain, rule_key, delivered_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_automation_deliveries_shop_external_time ON automation_deliveries(shop_domain, external_id, delivered_at DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_automation_deliveries_shop_user_agent_time ON automation_deliveries(shop_domain, user_agent, delivered_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_automation_clicks_shop_rule_time ON automation_clicks(shop_domain, rule_key, clicked_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_automation_clicks_shop_external_time ON automation_clicks(shop_domain, external_id, clicked_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_shopify_customers_shop_email ON shopify_customers(shop_domain, email)`;
@@ -3499,7 +3504,9 @@ export const processAutomationJob = async (jobId: string) => {
         token_id,
         external_id,
         target_url,
-        fcm_message_id
+        fcm_message_id,
+        user_agent,
+        ip_address
       )
       VALUES (
         ${claim.id},
@@ -3509,7 +3516,9 @@ export const processAutomationJob = async (jobId: string) => {
         ${deliveryTokenId},
         ${payload.externalId ?? null},
         ${payload.targetUrl ?? null},
-        ${fcmMessageId}
+        ${fcmMessageId},
+        ${activeTokenRow?.user_agent ? String(activeTokenRow.user_agent) : null},
+        ${null}
       )
     `;
 
@@ -6714,15 +6723,57 @@ export const getWelcomeAutomationDiagnostics = async (shopDomain: string) => {
   const stepConfig = {
     'reminder-2': {
       enabled: Boolean(welcomeConfig.steps['reminder-2'].enabled),
+      delayMinutes: Number(welcomeConfig.steps['reminder-2'].delayMinutes ?? 0),
       targetUrl: welcomeConfig.steps['reminder-2'].targetUrl ?? null,
       actionButtons: welcomeConfig.steps['reminder-2'].actionButtons ?? [],
     },
     'reminder-3': {
       enabled: Boolean(welcomeConfig.steps['reminder-3'].enabled),
+      delayMinutes: Number(welcomeConfig.steps['reminder-3'].delayMinutes ?? 0),
       targetUrl: welcomeConfig.steps['reminder-3'].targetUrl ?? null,
       actionButtons: welcomeConfig.steps['reminder-3'].actionButtons ?? [],
     },
   };
+
+  const lagSamples = (recentRows as Array<Record<string, unknown>>)
+    .filter((row) => (String(row.step_key ?? '') === 'reminder-2' || String(row.step_key ?? '') === 'reminder-3') && row.sent_at && row.due_at)
+    .map((row) => {
+      const sentAt = new Date(String(row.sent_at)).getTime();
+      const dueAt = new Date(String(row.due_at)).getTime();
+      const lagMinutes = Math.max(0, Math.round(((sentAt - dueAt) / 60000) * 100) / 100);
+      return {
+        stepKey: String(row.step_key ?? ''),
+        lagMinutes,
+      };
+    })
+    .filter((sample) => Number.isFinite(sample.lagMinutes));
+
+  const lagMinutesByStep = {
+    reminder2: lagSamples.filter((sample) => sample.stepKey === 'reminder-2').map((sample) => sample.lagMinutes),
+    reminder3: lagSamples.filter((sample) => sample.stepKey === 'reminder-3').map((sample) => sample.lagMinutes),
+  };
+
+  const average = (values: number[]) => {
+    if (values.length === 0) {
+      return null;
+    }
+    return Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 100) / 100;
+  };
+
+  const max = (values: number[]) => {
+    if (values.length === 0) {
+      return null;
+    }
+    return Math.round(Math.max(...values) * 100) / 100;
+  };
+
+  const delayedReminder2 = lagMinutesByStep.reminder2.filter((value) => value >= 2).length;
+  const delayedReminder3 = lagMinutesByStep.reminder3.filter((value) => value >= 2).length;
+  if (delayedReminder2 > 0 || delayedReminder3 > 0) {
+    inferredIssues.push(
+      `Observed delayed sends: reminder-2 delayed >=2m ${delayedReminder2} times, reminder-3 delayed >=2m ${delayedReminder3} times.`,
+    );
+  }
 
   for (const stepKey of ['reminder-2', 'reminder-3'] as const) {
     const buttons = stepConfig[stepKey].actionButtons;
@@ -6750,6 +6801,18 @@ export const getWelcomeAutomationDiagnostics = async (shopDomain: string) => {
     checkedAt: new Date().toISOString(),
     summary,
     stepConfig,
+    sendLagDiagnostics: {
+      reminder2: {
+        sampleCount: lagMinutesByStep.reminder2.length,
+        averageLagMinutes: average(lagMinutesByStep.reminder2),
+        maxLagMinutes: max(lagMinutesByStep.reminder2),
+      },
+      reminder3: {
+        sampleCount: lagMinutesByStep.reminder3.length,
+        averageLagMinutes: average(lagMinutesByStep.reminder3),
+        maxLagMinutes: max(lagMinutesByStep.reminder3),
+      },
+    },
     recentErrorsByStep,
     reminderMedia,
     inferredIssues,
@@ -6919,6 +6982,16 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
 
   const normalizedEmail = input.email?.trim().toLowerCase() ?? null;
   const normalizedCustomerId = input.customerId?.trim() || null;
+  const externalIdCartToken = (() => {
+    const external = String(input.externalId ?? '').trim();
+    if (!external.startsWith('cart:')) {
+      return null;
+    }
+
+    const parts = external.split(':');
+    return parts.length >= 3 ? parts.slice(2).join(':') : null;
+  })();
+  const resolvedCartToken = input.cartToken?.trim() || externalIdCartToken;
   const emailExternalId = normalizedEmail
     ? `email:${createHash('sha256').update(normalizedEmail).digest('hex').slice(0, 24)}`
     : null;
@@ -7001,12 +7074,12 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     return Promise.resolve([] as Array<{ external_id: string | null }>);
   })();
 
-  const cartExternalRows = input.cartToken
+  const cartExternalRows = resolvedCartToken
     ? await sql`
       SELECT external_id
       FROM subscriber_activity_events
       WHERE shop_domain = ${input.shopDomain}
-        AND cart_token = ${input.cartToken}
+        AND cart_token = ${resolvedCartToken}
         AND created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
       ORDER BY created_at DESC
       LIMIT 25
@@ -7205,6 +7278,41 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     }));
   };
 
+  const fetchAutomationDeliveryFingerprintFallback = async (ruleKey?: AutomationRuleKey | null) => {
+    const userAgent = input.userAgent?.trim() || null;
+    if (!userAgent) {
+      return [] as AutomationTouch[];
+    }
+
+    const rows = ruleKey
+      ? await sql`
+        SELECT id, rule_key, delivered_at
+        FROM automation_deliveries
+        WHERE shop_domain = ${input.shopDomain}
+          AND delivered_at >= ${windowStart}
+          AND rule_key = ${ruleKey}
+          AND user_agent = ${userAgent}
+        ORDER BY delivered_at DESC
+        LIMIT 20
+      `
+      : await sql`
+        SELECT id, rule_key, delivered_at
+        FROM automation_deliveries
+        WHERE shop_domain = ${input.shopDomain}
+          AND delivered_at >= ${windowStart}
+          AND user_agent = ${userAgent}
+        ORDER BY delivered_at DESC
+        LIMIT 20
+      `;
+
+    return rows.map((row) => ({
+      id: Number(row.id),
+      ruleKey: String(row.rule_key),
+      touchedAt: new Date(String(row.delivered_at)),
+      table: 'automation_deliveries' as const,
+    }));
+  };
+
   const windowDays = settings.attributionModel === 'click'
     ? Math.max(1, settings.clickWindowDays)
     : Math.max(1, settings.impressionWindowDays);
@@ -7347,6 +7455,15 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
 
     if (automationTouches.length === 0) {
       if (automationRuleKeyFromCampaign) {
+        automationTouches = await fetchAutomationDeliveryFingerprintFallback(automationRuleKeyFromCampaign);
+      }
+      if (automationTouches.length === 0) {
+        automationTouches = await fetchAutomationDeliveryFingerprintFallback();
+      }
+    }
+
+    if (automationTouches.length === 0) {
+      if (automationRuleKeyFromCampaign) {
         automationTouches = await fetchAutomationFingerprintFallback(automationRuleKeyFromCampaign);
       }
       if (automationTouches.length === 0) {
@@ -7424,19 +7541,97 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
 
   for (const touch of selectedAutomationTouches) {
     if (touch.table === 'automation_clicks') {
-      await sql`
+      const updatedRows = await sql`
         UPDATE automation_clicks
         SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
         WHERE id = ${touch.id}
           AND order_id IS NULL
+        RETURNING id
       `;
+
+      if (!updatedRows[0]?.id) {
+        await sql`
+          INSERT INTO automation_clicks (
+            rule_key,
+            shop_domain,
+            subscriber_id,
+            external_id,
+            target_url,
+            clicked_at,
+            user_agent,
+            ip_address,
+            referrer,
+            order_id,
+            converted_at,
+            revenue_cents
+          )
+          SELECT
+            rule_key,
+            shop_domain,
+            subscriber_id,
+            external_id,
+            target_url,
+            clicked_at,
+            user_agent,
+            ip_address,
+            referrer,
+            ${input.orderId},
+            ${occurredAt},
+            ${input.revenueCents}
+          FROM automation_clicks
+          WHERE id = ${touch.id}
+          LIMIT 1
+        `;
+      }
     } else {
-      await sql`
+      const updatedRows = await sql`
         UPDATE automation_deliveries
         SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
         WHERE id = ${touch.id}
           AND order_id IS NULL
+        RETURNING id
       `;
+
+      if (!updatedRows[0]?.id) {
+        await sql`
+          INSERT INTO automation_deliveries (
+            automation_job_id,
+            rule_key,
+            shop_domain,
+            subscriber_id,
+            token_id,
+            external_id,
+            target_url,
+            fcm_message_id,
+            delivered_at,
+            clicked_at,
+            user_agent,
+            ip_address,
+            order_id,
+            converted_at,
+            revenue_cents
+          )
+          SELECT
+            automation_job_id,
+            rule_key,
+            shop_domain,
+            subscriber_id,
+            token_id,
+            external_id,
+            target_url,
+            fcm_message_id,
+            delivered_at,
+            clicked_at,
+            user_agent,
+            ip_address,
+            ${input.orderId},
+            ${occurredAt},
+            ${input.revenueCents}
+          FROM automation_deliveries
+          WHERE id = ${touch.id}
+          LIMIT 1
+        `;
+      }
     }
   }
 
