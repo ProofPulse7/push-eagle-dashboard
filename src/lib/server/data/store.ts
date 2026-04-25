@@ -2734,6 +2734,7 @@ export const processIngestionJob = async (jobId: string) => {
         cartToken: payload.cartToken,
         metadata: {
           ...(payload.metadata ?? {}),
+          clientId: payload.clientId ?? null,
           pixelEventId,
         },
       });
@@ -7076,13 +7077,66 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
 
   const cartExternalRows = resolvedCartToken
     ? await sql`
+      WITH cart_related AS (
+        SELECT
+          external_id,
+          created_at,
+          COALESCE(metadata ->> 'clientId', '') AS client_id
+        FROM subscriber_activity_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND cart_token = ${resolvedCartToken}
+          AND created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
+
+        UNION ALL
+
+        SELECT
+          external_id,
+          created_at,
+          COALESCE(client_id, '') AS client_id
+        FROM pixel_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND cart_token = ${resolvedCartToken}
+          AND created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
+      ),
+      stitched AS (
+        SELECT external_id, created_at
+        FROM cart_related
+
+        UNION ALL
+
+        SELECT e.external_id, e.created_at
+        FROM subscriber_activity_events e
+        WHERE e.shop_domain = ${input.shopDomain}
+          AND e.created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
+          AND COALESCE(e.metadata ->> 'clientId', '') = ANY(
+            ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
+          )
+
+        UNION ALL
+
+        SELECT p.external_id, p.created_at
+        FROM pixel_events p
+        WHERE p.shop_domain = ${input.shopDomain}
+          AND p.created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
+          AND COALESCE(p.client_id, '') = ANY(
+            ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
+          )
+      )
       SELECT external_id
-      FROM subscriber_activity_events
-      WHERE shop_domain = ${input.shopDomain}
-        AND cart_token = ${resolvedCartToken}
-        AND created_at >= ${new Date(occurredAt.getTime() - 14 * 24 * 60 * 60 * 1000)}
-      ORDER BY created_at DESC
-      LIMIT 25
+      FROM stitched
+      WHERE external_id IS NOT NULL
+        AND external_id <> ''
+      ORDER BY
+        CASE
+          WHEN external_id LIKE 'anon:%' THEN 0
+          WHEN external_id LIKE 'shopify_customer:%' THEN 1
+          WHEN external_id LIKE 'email:%' THEN 2
+          WHEN external_id LIKE 'cart:%' THEN 3
+          WHEN external_id LIKE 'px:%' THEN 4
+          ELSE 5
+        END,
+        created_at DESC
+      LIMIT 50
     `
     : [];
 

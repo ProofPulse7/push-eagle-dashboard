@@ -106,14 +106,71 @@ const findExternalIdByCartToken = async (shopDomain: string, cartToken?: string 
 
   const sql = getNeonSql();
   const rows = await sql`
+    WITH cart_related AS (
+      SELECT
+        external_id,
+        created_at,
+        COALESCE(metadata ->> 'clientId', '') AS client_id
+      FROM subscriber_activity_events
+      WHERE shop_domain = ${shopDomain}
+        AND cart_token = ${normalizedToken}
+        AND external_id IS NOT NULL
+        AND external_id <> ''
+        AND created_at >= NOW() - INTERVAL '30 days'
+
+      UNION ALL
+
+      SELECT
+        external_id,
+        created_at,
+        COALESCE(client_id, '') AS client_id
+      FROM pixel_events
+      WHERE shop_domain = ${shopDomain}
+        AND cart_token = ${normalizedToken}
+        AND external_id IS NOT NULL
+        AND external_id <> ''
+        AND created_at >= NOW() - INTERVAL '30 days'
+    ),
+    stitched AS (
+      SELECT external_id, created_at
+      FROM cart_related
+
+      UNION ALL
+
+      SELECT e.external_id, e.created_at
+      FROM subscriber_activity_events e
+      WHERE e.shop_domain = ${shopDomain}
+        AND e.external_id IS NOT NULL
+        AND e.external_id <> ''
+        AND e.created_at >= NOW() - INTERVAL '30 days'
+        AND COALESCE(e.metadata ->> 'clientId', '') = ANY(
+          ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
+        )
+
+      UNION ALL
+
+      SELECT p.external_id, p.created_at
+      FROM pixel_events p
+      WHERE p.shop_domain = ${shopDomain}
+        AND p.external_id IS NOT NULL
+        AND p.external_id <> ''
+        AND p.created_at >= NOW() - INTERVAL '30 days'
+        AND COALESCE(p.client_id, '') = ANY(
+          ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
+        )
+    )
     SELECT external_id
-    FROM subscriber_activity_events
-    WHERE shop_domain = ${shopDomain}
-      AND cart_token = ${normalizedToken}
-      AND external_id IS NOT NULL
-      AND external_id <> ''
-      AND created_at >= NOW() - INTERVAL '30 days'
-    ORDER BY created_at DESC
+    FROM stitched
+    ORDER BY
+      CASE
+        WHEN external_id LIKE 'anon:%' THEN 0
+        WHEN external_id LIKE 'shopify_customer:%' THEN 1
+        WHEN external_id LIKE 'email:%' THEN 2
+        WHEN external_id LIKE 'cart:%' THEN 3
+        WHEN external_id LIKE 'px:%' THEN 4
+        ELSE 5
+      END,
+      created_at DESC
     LIMIT 1
   `;
 
