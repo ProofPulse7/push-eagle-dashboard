@@ -220,10 +220,11 @@ export async function POST(request: Request) {
     const cartToken = cartTokenFromNotes ?? payload.checkout_token ?? payload.cart_token ?? null;
     const clientIdFromNotes = getClientIdFromNoteAttributes(payload.note_attributes);
     const externalIdFromCartToken = await findExternalIdByCartToken(shopDomain, cartToken);
-    const externalId = externalIdFromNotes ?? externalIdFromCartToken ?? getCustomerExternalId({
+    const customerExternalId = getCustomerExternalId({
       customerId: payload.customer?.id ? String(payload.customer.id) : null,
       email: payload.customer?.email ?? null,
     });
+    const externalId = externalIdFromNotes ?? customerExternalId ?? externalIdFromCartToken;
 
     const orderId = String(payload.id ?? payload.order_number ?? `shopify-${Date.now()}`);
     const totalPriceCents = Math.round(Number(payload.total_price ?? 0) * 100);
