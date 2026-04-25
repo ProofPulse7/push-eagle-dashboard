@@ -177,6 +177,55 @@ const findExternalIdByCartToken = async (shopDomain: string, cartToken?: string 
   return rows[0]?.external_id ? String(rows[0].external_id) : null;
 };
 
+const findExternalIdByFingerprint = async (
+  shopDomain: string,
+  browserIp?: string | null,
+  userAgent?: string | null,
+) => {
+  const ip = String(browserIp ?? '').trim();
+  const ua = String(userAgent ?? '').trim();
+  if (!ip || !ua) {
+    return null;
+  }
+
+  const sql = getNeonSql();
+  const rows = await sql`
+    WITH recent_touch AS (
+      SELECT external_id, created_at
+      FROM pixel_events
+      WHERE shop_domain = ${shopDomain}
+        AND COALESCE(metadata ->> 'requestIp', '') = ${ip}
+        AND COALESCE(metadata ->> 'requestUserAgent', '') = ${ua}
+        AND created_at >= NOW() - INTERVAL '7 days'
+
+      UNION ALL
+
+      SELECT external_id, created_at
+      FROM subscriber_activity_events
+      WHERE shop_domain = ${shopDomain}
+        AND COALESCE(metadata ->> 'requestIp', '') = ${ip}
+        AND COALESCE(metadata ->> 'requestUserAgent', '') = ${ua}
+        AND created_at >= NOW() - INTERVAL '7 days'
+    )
+    SELECT external_id
+    FROM recent_touch
+    WHERE external_id IS NOT NULL
+      AND external_id <> ''
+    ORDER BY
+      CASE
+        WHEN external_id LIKE 'anon:%' THEN 0
+        WHEN external_id LIKE 'shopify_customer:%' THEN 1
+        WHEN external_id LIKE 'email:%' THEN 2
+        WHEN external_id LIKE 'cart:%' THEN 3
+        ELSE 4
+      END,
+      created_at DESC
+    LIMIT 1
+  `;
+
+  return rows[0]?.external_id ? String(rows[0].external_id) : null;
+};
+
 const normalizeCustomerTags = (tags?: string | null) => {
   if (!tags) {
     return null;
@@ -219,12 +268,15 @@ export async function POST(request: Request) {
     const cartTokenFromNotes = getCartTokenFromNoteAttributes(payload.note_attributes);
     const cartToken = cartTokenFromNotes ?? payload.checkout_token ?? payload.cart_token ?? null;
     const clientIdFromNotes = getClientIdFromNoteAttributes(payload.note_attributes);
+    const browserIp = payload.client_details?.browser_ip ?? payload.browser_ip ?? null;
+    const userAgent = payload.client_details?.user_agent ?? request.headers.get('user-agent');
     const externalIdFromCartToken = await findExternalIdByCartToken(shopDomain, cartToken);
+    const externalIdFromFingerprint = await findExternalIdByFingerprint(shopDomain, browserIp, userAgent);
     const customerExternalId = getCustomerExternalId({
       customerId: payload.customer?.id ? String(payload.customer.id) : null,
       email: payload.customer?.email ?? null,
     });
-    const externalId = externalIdFromNotes ?? customerExternalId ?? externalIdFromCartToken;
+    const externalId = externalIdFromNotes ?? externalIdFromCartToken ?? externalIdFromFingerprint ?? customerExternalId;
 
     const orderId = String(payload.id ?? payload.order_number ?? `shopify-${Date.now()}`);
     const totalPriceCents = Math.round(Number(payload.total_price ?? 0) * 100);
@@ -253,8 +305,8 @@ export async function POST(request: Request) {
           collectionHint: item.product_type ?? item.vendor ?? null,
         })),
         landingSite: payload.landing_site ?? null,
-        browserIp: payload.client_details?.browser_ip ?? payload.browser_ip ?? null,
-        userAgent: payload.client_details?.user_agent ?? request.headers.get('user-agent'),
+        browserIp,
+        userAgent,
       },
     });
 

@@ -257,7 +257,7 @@ type IngestionJobType = 'pixel_event' | 'shopify_order_create';
 type PixelIngestionPayload = {
   shopDomain: string;
   externalId: string;
-  eventType: 'page_view' | 'product_view' | 'add_to_cart' | 'checkout_start';
+  eventType: 'page_view' | 'product_view' | 'add_to_cart' | 'checkout_start' | 'checkout_complete';
   pageUrl?: string | null;
   productId?: string | null;
   cartToken?: string | null;
@@ -2738,6 +2738,40 @@ export const processIngestionJob = async (jobId: string) => {
           pixelEventId,
         },
       });
+
+      if (payload.eventType === 'checkout_complete') {
+        const metadata = (payload.metadata ?? {}) as Record<string, unknown>;
+        const rawOrderId = metadata.orderId ? String(metadata.orderId).trim() : '';
+        const orderId = rawOrderId ? rawOrderId.split('/').pop() || rawOrderId : '';
+        const totalPriceCentsRaw = Number(metadata.checkoutTotalPriceCents ?? 0);
+        const totalPriceCents = Number.isFinite(totalPriceCentsRaw) && totalPriceCentsRaw >= 0
+          ? Math.round(totalPriceCentsRaw)
+          : 0;
+
+        if (orderId) {
+          const occurredAtRaw = metadata.timestamp ? String(metadata.timestamp) : null;
+          const occurredAt = occurredAtRaw && !Number.isNaN(Date.parse(occurredAtRaw)) ? occurredAtRaw : null;
+
+          await upsertShopifyOrderEvent({
+            shopDomain: payload.shopDomain,
+            orderId,
+            externalId: payload.externalId,
+            totalPriceCents,
+            createdAt: occurredAt,
+            lineItems: [],
+          });
+
+          await recordAttributedConversion({
+            shopDomain: payload.shopDomain,
+            orderId,
+            revenueCents: totalPriceCents,
+            occurredAt,
+            externalId: payload.externalId,
+            cartToken: payload.cartToken ?? null,
+            clientId: payload.clientId ?? null,
+          });
+        }
+      }
     } else if (claim.job_type === 'shopify_order_create') {
       const payload = claim.payload as OrderCreateIngestionPayload;
 
@@ -3542,7 +3576,7 @@ export const processAutomationJob = async (jobId: string) => {
 export const recordSubscriberActivity = async (input: {
   shopDomain: string;
   externalId: string;
-  eventType: 'page_view' | 'product_view' | 'add_to_cart' | 'checkout_start';
+  eventType: 'page_view' | 'product_view' | 'add_to_cart' | 'checkout_start' | 'checkout_complete';
   pageUrl?: string | null;
   productId?: string | null;
   cartToken?: string | null;
@@ -5046,7 +5080,12 @@ export const upsertSubscriberToken = async (input: UpsertTokenInput) => {
         continue;
       }
 
-      const dueAt = new Date(now + step.delayMinutes * 60_000);
+      // Small scheduler-boundary compensation so minute-level cron polling does
+      // not systematically deliver delayed reminders one minute late.
+      const adjustedDelayMs = step.delayMinutes > 0
+        ? Math.max(0, step.delayMinutes * 60_000 - 45_000)
+        : 0;
+      const dueAt = new Date(now + adjustedDelayMs);
 
       const jobId = await enqueueAutomationJob({
         shopDomain: input.shopDomain,
@@ -7165,6 +7204,48 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
     `
     : [];
 
+  const fingerprintExternalRows = await (() => {
+    const ip = input.ipAddress?.trim() || null;
+    const ua = input.userAgent?.trim() || null;
+    if (!ip || !ua) {
+      return Promise.resolve([] as Array<{ external_id: string | null }>);
+    }
+
+    return sql`
+      SELECT external_id
+      FROM (
+        SELECT external_id, created_at
+        FROM pixel_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND COALESCE(metadata ->> 'requestIp', '') = ${ip}
+          AND COALESCE(metadata ->> 'requestUserAgent', '') = ${ua}
+          AND created_at >= ${new Date(occurredAt.getTime() - 7 * 24 * 60 * 60 * 1000)}
+
+        UNION ALL
+
+        SELECT external_id, created_at
+        FROM subscriber_activity_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND COALESCE(metadata ->> 'requestIp', '') = ${ip}
+          AND COALESCE(metadata ->> 'requestUserAgent', '') = ${ua}
+          AND created_at >= ${new Date(occurredAt.getTime() - 7 * 24 * 60 * 60 * 1000)}
+      ) stitched
+      WHERE external_id IS NOT NULL
+        AND external_id <> ''
+      ORDER BY
+        CASE
+          WHEN external_id LIKE 'anon:%' THEN 0
+          WHEN external_id LIKE 'shopify_customer:%' THEN 1
+          WHEN external_id LIKE 'email:%' THEN 2
+          WHEN external_id LIKE 'cart:%' THEN 3
+          WHEN external_id LIKE 'px:%' THEN 4
+          ELSE 5
+        END,
+        created_at DESC
+      LIMIT 50
+    `;
+  })();
+
   const externalIdCandidates = Array.from(
     new Set(
       [
@@ -7175,6 +7256,7 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
         ...historicalOrderExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...cartExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...clientExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
+        ...fingerprintExternalRows.map((row) => (row.external_id ? String(row.external_id) : null)),
       ].filter((value): value is string => Boolean(value)),
     ),
   );
