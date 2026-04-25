@@ -211,13 +211,17 @@ const findExternalIdByFingerprint = async (
     FROM recent_touch
     WHERE external_id IS NOT NULL
       AND external_id <> ''
+      AND (
+        external_id LIKE 'anon:%'
+        OR external_id LIKE 'cart:%'
+        OR external_id LIKE 'px:%'
+      )
     ORDER BY
       CASE
         WHEN external_id LIKE 'anon:%' THEN 0
-        WHEN external_id LIKE 'shopify_customer:%' THEN 1
-        WHEN external_id LIKE 'email:%' THEN 2
-        WHEN external_id LIKE 'cart:%' THEN 3
-        ELSE 4
+        WHEN external_id LIKE 'cart:%' THEN 1
+        WHEN external_id LIKE 'px:%' THEN 2
+        ELSE 3
       END,
       created_at DESC
     LIMIT 1

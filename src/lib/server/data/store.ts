@@ -2885,7 +2885,7 @@ export const listDueAutomationJobs = async (limit = 100, shardCount = 1, shardIn
     UPDATE automation_jobs
     SET status = 'pending', updated_at = NOW()
     WHERE status = 'processing'
-      AND updated_at < NOW() - INTERVAL '10 minutes'
+      AND updated_at < NOW() - INTERVAL '2 minutes'
   `;
 
   const rows = await sql`
@@ -2978,7 +2978,7 @@ export const processAutomationJob = async (jobId: string) => {
   }
 
   const tokenRows = await sql`
-    SELECT fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status
+    SELECT fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status, user_agent
     FROM subscriber_tokens
     WHERE id = ${claim.token_id ?? 0}
     LIMIT 1
@@ -2991,7 +2991,7 @@ export const processAutomationJob = async (jobId: string) => {
 
   if ((!token || tokenStatus !== 'active') && claim.subscriber_id) {
     const fallbackTokenRows = await sql`
-      SELECT id, fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status
+      SELECT id, fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status, user_agent
       FROM subscriber_tokens
       WHERE shop_domain = ${claim.shop_domain}
         AND subscriber_id = ${claim.subscriber_id}
@@ -3011,7 +3011,7 @@ export const processAutomationJob = async (jobId: string) => {
 
   if ((!token || tokenStatus !== 'active') && claim.payload?.externalId) {
     const fallbackByExternalRows = await sql`
-      SELECT t.id, t.fcm_token, t.token_type, t.vapid_endpoint, t.vapid_p256dh, t.vapid_auth, t.status
+      SELECT t.id, t.fcm_token, t.token_type, t.vapid_endpoint, t.vapid_p256dh, t.vapid_auth, t.status, t.user_agent
       FROM subscriber_tokens t
       JOIN subscribers s ON s.id = t.subscriber_id
       WHERE t.shop_domain = ${claim.shop_domain}
@@ -3098,6 +3098,7 @@ export const processAutomationJob = async (jobId: string) => {
     if (claim.rule_key === 'welcome_subscriber' && payloadStepKey) {
       const welcomeConfig = parseWelcomeRuleConfig(ruleRows[0]?.config ?? null);
       const step = welcomeConfig.steps[payloadStepKey as WelcomeStepKey];
+      const welcomeStepOrder: WelcomeStepKey[] = ['reminder-1', 'reminder-2', 'reminder-3'];
 
       if (!step?.enabled) {
         await sql`
@@ -3193,6 +3194,79 @@ export const processAutomationJob = async (jobId: string) => {
             WHERE id = ${jobId}
           `;
           return { processed: false, error: 'Duplicate welcome reminder job suppressed for subscriber.' };
+        }
+      }
+
+      const currentStepIndex = welcomeStepOrder.indexOf(payloadStepKey as WelcomeStepKey);
+      if (currentStepIndex > 0) {
+        const previousStepKey = welcomeStepOrder[currentStepIndex - 1];
+        const payloadExternalIdForOrdering = payload.externalId == null ? '' : String(payload.externalId);
+
+        const previousDeliveredRows = payloadExternalIdForOrdering
+          ? await sql`
+            SELECT d.id
+            FROM automation_deliveries d
+            JOIN automation_jobs j ON j.id = d.automation_job_id
+            WHERE d.shop_domain = ${claim.shop_domain}
+              AND d.rule_key = 'welcome_subscriber'
+              AND d.external_id = ${payloadExternalIdForOrdering}
+              AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+            ORDER BY d.delivered_at DESC
+            LIMIT 1
+          `
+          : claim.subscriber_id
+            ? await sql`
+              SELECT d.id
+              FROM automation_deliveries d
+              JOIN automation_jobs j ON j.id = d.automation_job_id
+              WHERE d.shop_domain = ${claim.shop_domain}
+                AND d.rule_key = 'welcome_subscriber'
+                AND d.subscriber_id = ${claim.subscriber_id}
+                AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+              ORDER BY d.delivered_at DESC
+              LIMIT 1
+            `
+            : [];
+
+        if (!previousDeliveredRows[0]?.id) {
+          const previousPendingRows = payloadExternalIdForOrdering
+            ? await sql`
+              SELECT id
+              FROM automation_jobs
+              WHERE shop_domain = ${claim.shop_domain}
+                AND rule_key = 'welcome_subscriber'
+                AND payload ->> 'externalId' = ${payloadExternalIdForOrdering}
+                AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                AND status IN ('pending', 'processing', 'sent')
+              ORDER BY created_at ASC
+              LIMIT 1
+            `
+            : claim.subscriber_id
+              ? await sql`
+                SELECT id
+                FROM automation_jobs
+                WHERE shop_domain = ${claim.shop_domain}
+                  AND rule_key = 'welcome_subscriber'
+                  AND subscriber_id = ${claim.subscriber_id}
+                  AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                  AND status IN ('pending', 'processing', 'sent')
+                ORDER BY created_at ASC
+                LIMIT 1
+              `
+              : [];
+
+          if (previousPendingRows[0]?.id) {
+            const waitMessage = `Waiting for previous welcome step (${previousStepKey}) before sending ${payloadStepKey}.`;
+            await sql`
+              UPDATE automation_jobs
+              SET status = 'pending',
+                  error_message = ${waitMessage},
+                  due_at = NOW() + INTERVAL '90 seconds',
+                  updated_at = NOW()
+              WHERE id = ${jobId}
+            `;
+            return { processed: false, error: waitMessage };
+          }
         }
       }
 
@@ -3560,11 +3634,12 @@ export const processAutomationJob = async (jobId: string) => {
     return { processed: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to send automation message.';
+    const retryInterval = claim.rule_key === 'welcome_subscriber' ? '1 minute' : '5 minutes';
     await sql`
       UPDATE automation_jobs
       SET status = CASE WHEN attempts >= 5 THEN 'failed' ELSE 'pending' END,
           error_message = ${message},
-          due_at = CASE WHEN attempts >= 5 THEN due_at ELSE NOW() + INTERVAL '5 minutes' END,
+          due_at = CASE WHEN attempts >= 5 THEN due_at ELSE NOW() + ${retryInterval}::interval END,
           updated_at = NOW()
       WHERE id = ${jobId}
     `;
@@ -7232,14 +7307,17 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
       ) stitched
       WHERE external_id IS NOT NULL
         AND external_id <> ''
+        AND (
+          external_id LIKE 'anon:%'
+          OR external_id LIKE 'cart:%'
+          OR external_id LIKE 'px:%'
+        )
       ORDER BY
         CASE
           WHEN external_id LIKE 'anon:%' THEN 0
-          WHEN external_id LIKE 'shopify_customer:%' THEN 1
-          WHEN external_id LIKE 'email:%' THEN 2
-          WHEN external_id LIKE 'cart:%' THEN 3
-          WHEN external_id LIKE 'px:%' THEN 4
-          ELSE 5
+          WHEN external_id LIKE 'cart:%' THEN 1
+          WHEN external_id LIKE 'px:%' THEN 2
+          ELSE 3
         END,
         created_at DESC
       LIMIT 50
