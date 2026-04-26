@@ -3371,6 +3371,18 @@ export const processAutomationJob = async (jobId: string) => {
     if (claim.rule_key === 'cart_abandonment_30m' && payloadStepKey) {
       const cartConfig = parseCartRuleConfig(ruleRows[0]?.config ?? null);
       const step = cartConfig.steps[payloadStepKey as CartStepKey];
+      const cartStepOrder: CartStepKey[] = ['cart-reminder-1', 'cart-reminder-2', 'cart-reminder-3'];
+      const payloadExternalId = payload.externalId == null ? '' : String(payload.externalId);
+      const payloadCartToken = payload.cartToken == null ? '' : String(payload.cartToken);
+      const payloadTriggeredAtRaw = payload.triggeredAt == null ? '' : String(payload.triggeredAt);
+      const payloadTriggeredAt = payloadTriggeredAtRaw && !Number.isNaN(Date.parse(payloadTriggeredAtRaw))
+        ? new Date(payloadTriggeredAtRaw)
+        : null;
+      const identityMatch = payloadExternalId ? sql`external_id = ${payloadExternalId}` : sql`FALSE`;
+      const cartMatch = payloadCartToken ? sql`cart_token = ${payloadCartToken}` : sql`FALSE`;
+      const deliveryExternalMatch = payloadExternalId ? sql`d.external_id = ${payloadExternalId}` : sql`FALSE`;
+      const deliveryCartMatch = payloadCartToken ? sql`j.payload ->> 'cartToken' = ${payloadCartToken}` : sql`FALSE`;
+      const deliverySubscriberMatch = claim.subscriber_id ? sql`d.subscriber_id = ${claim.subscriber_id}` : sql`FALSE`;
 
       if (!step?.enabled) {
         await sql`
@@ -3397,6 +3409,76 @@ export const processAutomationJob = async (jobId: string) => {
           actionButtons: step.actionButtons ?? [],
         },
       };
+
+      const checkoutCompletedRows = await sql`
+        SELECT id
+        FROM subscriber_activity_events
+        WHERE shop_domain = ${claim.shop_domain}
+          AND event_type = 'checkout_complete'
+          AND (${identityMatch} OR ${cartMatch})
+          ${payloadTriggeredAt ? sql`AND created_at >= ${payloadTriggeredAt}` : sql``}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+
+      if (checkoutCompletedRows[0]?.id) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Cart recovered before reminder send.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Cart recovered before reminder send.' };
+      }
+
+      const stepIndex = cartStepOrder.indexOf(payloadStepKey as CartStepKey);
+      if (stepIndex > 0) {
+        const previousStepKey = cartStepOrder[stepIndex - 1];
+        const previousStepDeliveryRows = await sql`
+          SELECT d.automation_job_id
+          FROM automation_deliveries d
+          JOIN automation_jobs j ON j.id = d.automation_job_id
+          WHERE d.shop_domain = ${claim.shop_domain}
+            AND d.rule_key = 'cart_abandonment_30m'
+            AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+            AND (${deliveryExternalMatch} OR ${deliveryCartMatch} OR ${deliverySubscriberMatch})
+          ORDER BY d.delivered_at DESC
+          LIMIT 1
+        `;
+
+        if (!previousStepDeliveryRows[0]?.automation_job_id) {
+          const waitMessage = `Waiting for previous cart reminder step (${previousStepKey}) before sending ${payloadStepKey}.`;
+          await sql`
+            UPDATE automation_jobs
+            SET status = 'pending',
+                error_message = ${waitMessage},
+                due_at = NOW() + INTERVAL '1 minute',
+                updated_at = NOW()
+            WHERE id = ${jobId}
+          `;
+          return { processed: false, error: waitMessage };
+        }
+      }
+
+      const existingStepDeliveryRows = await sql`
+        SELECT d.automation_job_id
+        FROM automation_deliveries d
+        JOIN automation_jobs j ON j.id = d.automation_job_id
+        WHERE d.shop_domain = ${claim.shop_domain}
+          AND d.rule_key = 'cart_abandonment_30m'
+          AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+          AND (${deliveryExternalMatch} OR ${deliveryCartMatch} OR ${deliverySubscriberMatch})
+        ORDER BY d.delivered_at DESC
+        LIMIT 1
+      `;
+
+      if (existingStepDeliveryRows[0]?.automation_job_id) {
+        await sql`
+          UPDATE automation_jobs
+          SET status = 'skipped', error_message = 'Cart reminder already delivered for this step.', updated_at = NOW()
+          WHERE id = ${jobId}
+        `;
+        return { processed: false, error: 'Cart reminder already delivered for this step.' };
+      }
     }
 
     if (claim.rule_key === 'browse_abandonment_15m' && payloadStepKey) {
