@@ -28,6 +28,8 @@ const runCampaignShard = async (env, shardIndex, shardCount, maxCampaigns, maxBa
     headers: {
       Authorization: `Bearer ${env.CRON_SECRET}`,
       'x-automation-secret': env.CRON_SECRET,
+      'x-vercel-cron': '1',
+      'user-agent': 'vercel-cron/1.0',
       'x-worker-id': `cf-${shardIndex}`,
     },
   });
@@ -62,6 +64,8 @@ const runAutomationShard = async (env, shardIndex, shardCount, maxJobs) => {
     headers: {
       Authorization: `Bearer ${env.CRON_SECRET}`,
       'x-automation-secret': env.CRON_SECRET,
+      'x-vercel-cron': '1',
+      'user-agent': 'vercel-cron/1.0',
       'x-worker-id': `cf-auto-${shardIndex}`,
     },
   });
@@ -96,6 +100,8 @@ const runIngestionShard = async (env, shardIndex, shardCount, limit) => {
     headers: {
       Authorization: `Bearer ${env.CRON_SECRET}`,
       'x-automation-secret': env.CRON_SECRET,
+      'x-vercel-cron': '1',
+      'user-agent': 'vercel-cron/1.0',
       'x-worker-id': `cf-ingest-${shardIndex}`,
     },
   });
