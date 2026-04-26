@@ -69,6 +69,29 @@ type DiagnosticResult = {
     welcomePendingJobs: number;
     welcomeDueNowJobs: number;
   };
+  cronHealth?: {
+    processAutomations: {
+      lastRunAt: string | null;
+      lastOkAt: string | null;
+      lastErrorAt: string | null;
+      minutesSinceLastRun: number | null;
+      errorsLastHour: number;
+    };
+    processIngestion: {
+      lastRunAt: string | null;
+      lastOkAt: string | null;
+      lastErrorAt: string | null;
+      minutesSinceLastRun: number | null;
+      errorsLastHour: number;
+    };
+    processCampaigns: {
+      lastRunAt: string | null;
+      lastOkAt: string | null;
+      lastErrorAt: string | null;
+      minutesSinceLastRun: number | null;
+      errorsLastHour: number;
+    };
+  };
   identityCoverage: {
     orders7d: number;
     withExternalId: number;
@@ -249,6 +272,7 @@ export async function GET(request: NextRequest) {
       automationDeliveriesFingerprintRows,
       unattributedOrderContextRows,
       automationQueueRows,
+      cronHeartbeatRows,
       impressionCoverageRows,
       orderIdentityNamespaceRows,
       unattributedOrderBridgeRows,
@@ -526,6 +550,21 @@ export async function GET(request: NextRequest) {
       `,
       sql`
         SELECT
+          job_name,
+          MAX(started_at) AS last_run_at,
+          MAX(completed_at) FILTER (WHERE status = 'ok') AS last_ok_at,
+          MAX(completed_at) FILTER (WHERE status = 'error') AS last_error_at,
+          COUNT(*) FILTER (
+            WHERE status = 'error'
+              AND started_at >= NOW() - INTERVAL '1 hour'
+          )::INT AS errors_last_hour
+        FROM cron_heartbeats
+        WHERE job_name IN ('process_automations', 'process_ingestion', 'process_campaigns')
+          AND started_at >= NOW() - INTERVAL '7 days'
+        GROUP BY job_name
+      `,
+      sql`
+        SELECT
           COUNT(*)::INT AS welcome_deliveries_7d,
           COUNT(*) FILTER (WHERE COALESCE(external_id, '') <> '')::INT AS with_external_id_7d,
           COUNT(*) FILTER (WHERE COALESCE(user_agent, '') <> '')::INT AS with_user_agent_7d,
@@ -685,6 +724,40 @@ export async function GET(request: NextRequest) {
         : null,
       welcomePendingJobs: Number(automationQueueRows[0]?.welcome_pending_jobs ?? 0),
       welcomeDueNowJobs: Number(automationQueueRows[0]?.welcome_due_now_jobs ?? 0),
+    };
+
+    const heartbeatByJob = new Map(
+      (cronHeartbeatRows as Array<Record<string, unknown>>).map((row) => [
+        String(row.job_name ?? ''),
+        {
+          lastRunAt: row.last_run_at ? new Date(String(row.last_run_at)).toISOString() : null,
+          lastOkAt: row.last_ok_at ? new Date(String(row.last_ok_at)).toISOString() : null,
+          lastErrorAt: row.last_error_at ? new Date(String(row.last_error_at)).toISOString() : null,
+          errorsLastHour: Number(row.errors_last_hour ?? 0),
+        },
+      ]),
+    );
+
+    const toHealth = (jobName: string) => {
+      const raw = heartbeatByJob.get(jobName) ?? {
+        lastRunAt: null,
+        lastOkAt: null,
+        lastErrorAt: null,
+        errorsLastHour: 0,
+      };
+      const minutesSinceLastRun = raw.lastRunAt
+        ? Math.max(0, Math.floor((Date.now() - new Date(raw.lastRunAt).getTime()) / 60000))
+        : null;
+      return {
+        ...raw,
+        minutesSinceLastRun,
+      };
+    };
+
+    const cronHealth: DiagnosticResult['cronHealth'] = {
+      processAutomations: toHealth('process_automations'),
+      processIngestion: toHealth('process_ingestion'),
+      processCampaigns: toHealth('process_campaigns'),
     };
 
     const impressionCoverageDebug: DiagnosticResult['impressionCoverageDebug'] = {
@@ -915,6 +988,34 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    if ((cronHealth.processAutomations.minutesSinceLastRun ?? 9999) > 3) {
+      issues.push({
+        severity: 'warning',
+        component: 'AutomationCron',
+        title: 'Automation cron heartbeat is stale',
+        description: 'process_automations has not run recently; delayed reminders may wait for fallback paths.',
+        details: cronHealth.processAutomations,
+      });
+    } else {
+      issues.push({
+        severity: 'info',
+        component: 'AutomationCron',
+        title: 'Automation cron heartbeat is recent',
+        description: 'process_automations is running within expected cadence.',
+        details: cronHealth.processAutomations,
+      });
+    }
+
+    if ((cronHealth.processAutomations.errorsLastHour ?? 0) > 0 || (cronHealth.processIngestion.errorsLastHour ?? 0) > 0) {
+      issues.push({
+        severity: 'warning',
+        component: 'CronErrors',
+        title: 'Recent cron errors detected',
+        description: 'One or more cron workers reported errors in the last hour.',
+        details: cronHealth,
+      });
+    }
+
     if (ingestionHealth.failedJobs > 0) {
       issues.push({
         severity: 'error',
@@ -1118,6 +1219,7 @@ export async function GET(request: NextRequest) {
       webhookHealth,
       ingestionHealth,
       automationQueueHealth,
+      cronHealth,
       identityCoverage,
       impressionCoverageDebug,
       orderIdentityNamespaceDebug,

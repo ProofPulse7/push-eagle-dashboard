@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { env } from '@/lib/config/env';
-import { listDueAutomationJobs, processAutomationJob, pruneAutomationData } from '@/lib/server/data/store';
+import { completeCronHeartbeat, listDueAutomationJobs, processAutomationJob, pruneAutomationData, startCronHeartbeat } from '@/lib/server/data/store';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -34,6 +34,7 @@ const parsePositiveInt = (value: string | null, fallback: number, min: number, m
 };
 
 export async function GET(request: Request) {
+  let heartbeatId: string | null = null;
   try {
     if (!isAuthorized(request)) {
       return NextResponse.json({ ok: false, error: 'Unauthorized cron request.' }, { status: 401 });
@@ -45,6 +46,14 @@ export async function GET(request: Request) {
     const maxJobs = parsePositiveInt(url.searchParams.get('maxJobs'), 200, 1, 2000);
     const maxConcurrent = parsePositiveInt(url.searchParams.get('maxConcurrent'), 50, 1, 200);
     const workerId = request.headers.get('x-worker-id') ?? `worker-${shardIndex}`;
+
+    heartbeatId = await startCronHeartbeat('process_automations', {
+      shardCount,
+      shardIndex,
+      maxJobs,
+      maxConcurrent,
+      workerId,
+    });
 
     await pruneAutomationData();
 
@@ -63,7 +72,7 @@ export async function GET(request: Request) {
       processed.push(...results);
     }
 
-    return NextResponse.json({
+    const responsePayload = {
       ok: true,
       workerId,
       shardCount,
@@ -74,9 +83,30 @@ export async function GET(request: Request) {
       skippedCount: processed.filter((item) => !item.processed && item.error && !String(item.error).toLowerCase().includes('failed')).length,
       failedCount: processed.filter((item) => !item.processed && item.error).length,
       processed,
-    });
+    };
+
+    if (heartbeatId) {
+      await completeCronHeartbeat({
+        heartbeatId,
+        ok: true,
+        metadata: {
+          dueJobs: jobs.length,
+          sentCount: responsePayload.sentCount,
+          failedCount: responsePayload.failedCount,
+        },
+      });
+    }
+
+    return NextResponse.json(responsePayload);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to process automations.';
+    if (heartbeatId) {
+      await completeCronHeartbeat({
+        heartbeatId,
+        ok: false,
+        errorMessage: message,
+      });
+    }
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }

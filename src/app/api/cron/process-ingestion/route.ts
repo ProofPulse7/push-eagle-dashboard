@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { env } from '@/lib/config/env';
-import { listDueAutomationJobs, processAutomationJob, processIngestionQueue } from '@/lib/server/data/store';
+import { completeCronHeartbeat, listDueAutomationJobs, processAutomationJob, processIngestionQueue, startCronHeartbeat } from '@/lib/server/data/store';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -33,6 +33,7 @@ const parsePositiveInt = (value: string | null, fallback: number, min: number, m
 };
 
 export async function GET(request: Request) {
+  let heartbeatId: string | null = null;
   try {
     if (!isAuthorized(request)) {
       return NextResponse.json({ ok: false, error: 'Unauthorized cron request.' }, { status: 401 });
@@ -44,6 +45,14 @@ export async function GET(request: Request) {
     const limit = parsePositiveInt(url.searchParams.get('limit'), 500, 1, 5000);
     const maxConcurrent = parsePositiveInt(url.searchParams.get('maxConcurrent'), 50, 1, 200);
     const workerId = request.headers.get('x-worker-id') ?? `worker-${shardIndex}`;
+
+    heartbeatId = await startCronHeartbeat('process_ingestion', {
+      shardCount,
+      shardIndex,
+      limit,
+      maxConcurrent,
+      workerId,
+    });
 
     const result = await processIngestionQueue({
       shardCount,
@@ -74,7 +83,7 @@ export async function GET(request: Request) {
       automationProcessed.push(...chunkResults);
     }
 
-    return NextResponse.json({
+    const responsePayload = {
       ok: true,
       workerId,
       shardCount,
@@ -90,9 +99,33 @@ export async function GET(request: Request) {
         processedCount: automationProcessed.filter((item) => item.processed).length,
         failedCount: automationProcessed.filter((item) => !item.processed && item.error).length,
       },
-    });
+    };
+
+    if (heartbeatId) {
+      await completeCronHeartbeat({
+        heartbeatId,
+        ok: true,
+        metadata: {
+          ingestionDueJobs: result.dueJobs,
+          ingestionProcessed: result.processedCount,
+          ingestionFailed: result.failedCount,
+          automationDueJobs: automationJobs.length,
+          automationProcessed: responsePayload.automationFallback.processedCount,
+          automationFailed: responsePayload.automationFallback.failedCount,
+        },
+      });
+    }
+
+    return NextResponse.json(responsePayload);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to process ingestion queue.';
+    if (heartbeatId) {
+      await completeCronHeartbeat({
+        heartbeatId,
+        ok: false,
+        errorMessage: message,
+      });
+    }
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }

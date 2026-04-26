@@ -69,6 +69,29 @@ interface DiagnosticResult {
     welcomePendingJobs: number;
     welcomeDueNowJobs: number;
   };
+  cronHealth?: {
+    processAutomations: {
+      lastRunAt: string | null;
+      lastOkAt: string | null;
+      lastErrorAt: string | null;
+      minutesSinceLastRun: number | null;
+      errorsLastHour: number;
+    };
+    processIngestion: {
+      lastRunAt: string | null;
+      lastOkAt: string | null;
+      lastErrorAt: string | null;
+      minutesSinceLastRun: number | null;
+      errorsLastHour: number;
+    };
+    processCampaigns: {
+      lastRunAt: string | null;
+      lastOkAt: string | null;
+      lastErrorAt: string | null;
+      minutesSinceLastRun: number | null;
+      errorsLastHour: number;
+    };
+  };
   identityCoverage: {
     orders7d: number;
     withExternalId: number;
@@ -582,6 +605,39 @@ function DiagnosticPageContent() {
           </div>
 
           <div className="grid gap-6 xl:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Cron Heartbeat</CardTitle>
+                <CardDescription>Identifies whether delayed reminders are caused by stale cron workers.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <div className="rounded-lg border p-3">
+                  <div className="font-medium">process_automations</div>
+                  <div>lastRunAt={diagnostic.cronHealth?.processAutomations.lastRunAt ?? 'none'}</div>
+                  <div>lastOkAt={diagnostic.cronHealth?.processAutomations.lastOkAt ?? 'none'}</div>
+                  <div>lastErrorAt={diagnostic.cronHealth?.processAutomations.lastErrorAt ?? 'none'}</div>
+                  <div>minutesSinceLastRun={diagnostic.cronHealth?.processAutomations.minutesSinceLastRun ?? 'n/a'}</div>
+                  <div>errorsLastHour={diagnostic.cronHealth?.processAutomations.errorsLastHour ?? 0}</div>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <div className="font-medium">process_ingestion</div>
+                  <div>lastRunAt={diagnostic.cronHealth?.processIngestion.lastRunAt ?? 'none'}</div>
+                  <div>lastOkAt={diagnostic.cronHealth?.processIngestion.lastOkAt ?? 'none'}</div>
+                  <div>lastErrorAt={diagnostic.cronHealth?.processIngestion.lastErrorAt ?? 'none'}</div>
+                  <div>minutesSinceLastRun={diagnostic.cronHealth?.processIngestion.minutesSinceLastRun ?? 'n/a'}</div>
+                  <div>errorsLastHour={diagnostic.cronHealth?.processIngestion.errorsLastHour ?? 0}</div>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <div className="font-medium">process_campaigns</div>
+                  <div>lastRunAt={diagnostic.cronHealth?.processCampaigns.lastRunAt ?? 'none'}</div>
+                  <div>lastOkAt={diagnostic.cronHealth?.processCampaigns.lastOkAt ?? 'none'}</div>
+                  <div>lastErrorAt={diagnostic.cronHealth?.processCampaigns.lastErrorAt ?? 'none'}</div>
+                  <div>minutesSinceLastRun={diagnostic.cronHealth?.processCampaigns.minutesSinceLastRun ?? 'n/a'}</div>
+                  <div>errorsLastHour={diagnostic.cronHealth?.processCampaigns.errorsLastHour ?? 0}</div>
+                </div>
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader>
                 <CardTitle>Automation Queue Health</CardTitle>

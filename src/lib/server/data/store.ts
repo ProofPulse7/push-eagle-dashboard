@@ -828,6 +828,16 @@ const ensureSchema = async () => {
         processed_at TIMESTAMPTZ
       )`;
 
+      await sql`CREATE TABLE IF NOT EXISTS cron_heartbeats (
+        id TEXT PRIMARY KEY,
+        job_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        error_message TEXT,
+        metadata JSONB
+      )`;
+
       await sql`CREATE TABLE IF NOT EXISTS campaign_schedules (
         id TEXT PRIMARY KEY,
         campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -940,6 +950,7 @@ const ensureSchema = async () => {
       await sql`CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_due ON ingestion_jobs(status, due_at)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_shop_type ON ingestion_jobs(shop_domain, job_type, status, due_at)`;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_ingestion_jobs_dedupe ON ingestion_jobs(shop_domain, job_type, dedupe_key) WHERE dedupe_key IS NOT NULL`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_cron_heartbeats_job_started ON cron_heartbeats(job_name, started_at DESC)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_campaign_schedules_send_at ON campaign_schedules(send_at) WHERE send_at IS NOT NULL`;
       await sql`CREATE INDEX IF NOT EXISTS idx_smart_delivery_metrics_shop ON smart_delivery_metrics(shop_domain)`;
       await sql`CREATE INDEX IF NOT EXISTS idx_campaign_deliveries_campaign ON campaign_deliveries(campaign_id)`;
@@ -2571,6 +2582,48 @@ export const enqueueAutomationJob = async (input: {
   `;
 
   return rows[0] ? String(rows[0].id) : null;
+};
+
+export const startCronHeartbeat = async (jobName: string, metadata?: Record<string, unknown> | null) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  const heartbeatId = randomUUID();
+
+  await sql`
+    INSERT INTO cron_heartbeats (id, job_name, status, started_at, metadata)
+    VALUES (
+      ${heartbeatId},
+      ${jobName},
+      'running',
+      NOW(),
+      ${JSON.stringify(metadata ?? {})}::jsonb
+    )
+  `;
+
+  return heartbeatId;
+};
+
+export const completeCronHeartbeat = async (input: {
+  heartbeatId: string;
+  ok: boolean;
+  errorMessage?: string | null;
+  metadata?: Record<string, unknown> | null;
+}) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  await sql`
+    UPDATE cron_heartbeats
+    SET
+      status = ${input.ok ? 'ok' : 'error'},
+      completed_at = NOW(),
+      error_message = ${input.errorMessage ?? null},
+      metadata = CASE
+        WHEN ${JSON.stringify(input.metadata ?? null)}::jsonb IS NULL THEN metadata
+        ELSE ${JSON.stringify(input.metadata ?? {})}::jsonb
+      END
+    WHERE id = ${input.heartbeatId}
+  `;
 };
 
 /**
@@ -6648,7 +6701,7 @@ export const getWelcomeAutomationDiagnostics = async (shopDomain: string) => {
     WHERE shop_domain = ${shopDomain}
       AND rule_key = 'welcome_subscriber'
       AND status = 'processing'
-      AND updated_at < NOW() - INTERVAL '10 minutes'
+        AND updated_at < NOW() - INTERVAL '2 minutes'
       AND COALESCE(payload -> 'metadata' ->> 'stepKey', '') IN ('reminder-2', 'reminder-3')
   `;
 
@@ -6746,7 +6799,7 @@ export const getWelcomeAutomationDiagnostics = async (shopDomain: string) => {
     inferredIssues.push('Some delayed jobs are failed; review recent error_message values and token_status.');
   }
   if (summary.staleProcessing > 0) {
-    inferredIssues.push('Stale processing jobs detected (>10m); worker interruption/backpressure likely occurred.');
+    inferredIssues.push('Stale processing jobs detected (>2m); worker interruption/backpressure likely occurred.');
   }
   if (summary.reminder2.sent === 0 && summary.reminder2.pending === 0 && summary.reminder2.failed === 0) {
     inferredIssues.push('No reminder-2 jobs found; welcome step enqueue path may not be creating delayed jobs.');
