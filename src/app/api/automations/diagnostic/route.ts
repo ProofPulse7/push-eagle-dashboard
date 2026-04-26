@@ -988,7 +988,15 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    if ((cronHealth.processAutomations.minutesSinceLastRun ?? 9999) > 3) {
+    if (!cronHealth.processAutomations.lastRunAt) {
+      issues.push({
+        severity: 'error',
+        component: 'AutomationCron',
+        title: 'Automation cron has never run',
+        description: 'No process_automations heartbeat was found. Configure deployment cron schedules so reminder-2/reminder-3 run without storefront traffic.',
+        details: cronHealth.processAutomations,
+      });
+    } else if ((cronHealth.processAutomations.minutesSinceLastRun ?? 9999) > 3) {
       issues.push({
         severity: 'warning',
         component: 'AutomationCron',
