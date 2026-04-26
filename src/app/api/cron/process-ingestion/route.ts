@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { env } from '@/lib/config/env';
-import { processIngestionQueue } from '@/lib/server/data/store';
+import { listDueAutomationJobs, processAutomationJob, processIngestionQueue } from '@/lib/server/data/store';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -52,6 +52,28 @@ export async function GET(request: Request) {
       maxConcurrent,
     });
 
+    const automationMaxJobs = parsePositiveInt(url.searchParams.get('automationMaxJobs'), 100, 0, 1000);
+    const automationMaxConcurrent = parsePositiveInt(url.searchParams.get('automationMaxConcurrent'), 30, 1, 200);
+    const automationJobs = automationMaxJobs > 0
+      ? await listDueAutomationJobs(automationMaxJobs, shardCount, shardIndex)
+      : [];
+    const automationProcessed = [] as Array<{ jobId: string; processed: boolean; error?: string }>;
+
+    for (let index = 0; index < automationJobs.length; index += automationMaxConcurrent) {
+      const chunk = automationJobs.slice(index, index + automationMaxConcurrent);
+      const chunkResults = await Promise.all(
+        chunk.map(async (job) => {
+          const processedResult = await processAutomationJob(job.id);
+          return {
+            jobId: job.id,
+            processed: Boolean(processedResult.processed),
+            error: processedResult.error,
+          };
+        }),
+      );
+      automationProcessed.push(...chunkResults);
+    }
+
     return NextResponse.json({
       ok: true,
       workerId,
@@ -63,6 +85,11 @@ export async function GET(request: Request) {
       processedCount: result.processedCount,
       failedCount: result.failedCount,
       processed: result.processed,
+      automationFallback: {
+        dueJobs: automationJobs.length,
+        processedCount: automationProcessed.filter((item) => item.processed).length,
+        failedCount: automationProcessed.filter((item) => !item.processed && item.error).length,
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to process ingestion queue.';

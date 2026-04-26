@@ -7730,19 +7730,93 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
 
   for (const touch of selectedCampaignTouches) {
     if (touch.table === 'campaign_clicks') {
-      await sql`
+      const updatedRows = await sql`
         UPDATE campaign_clicks
         SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
         WHERE id = ${touch.id}
           AND order_id IS NULL
+        RETURNING id
       `;
+
+      if (!updatedRows[0]?.id) {
+        await sql`
+          INSERT INTO campaign_clicks (
+            campaign_id,
+            shop_domain,
+            subscriber_id,
+            target_url,
+            clicked_at,
+            order_id,
+            converted_at,
+            revenue_cents,
+            user_agent,
+            ip_address,
+            external_id,
+            referrer
+          )
+          SELECT
+            campaign_id,
+            shop_domain,
+            subscriber_id,
+            target_url,
+            clicked_at,
+            ${input.orderId},
+            ${occurredAt},
+            ${input.revenueCents},
+            user_agent,
+            ip_address,
+            external_id,
+            referrer
+          FROM campaign_clicks
+          WHERE id = ${touch.id}
+          LIMIT 1
+        `;
+      }
     } else {
-      await sql`
+      const updatedRows = await sql`
         UPDATE campaign_deliveries
         SET converted_at = ${occurredAt}, order_id = ${input.orderId}, revenue_cents = ${input.revenueCents}
         WHERE id = ${touch.id}
           AND order_id IS NULL
+        RETURNING id
       `;
+
+      if (!updatedRows[0]?.id) {
+        await sql`
+          INSERT INTO campaign_deliveries (
+            campaign_id,
+            shop_domain,
+            subscriber_id,
+            target_url,
+            sent_at,
+            delivered_at,
+            clicked_at,
+            order_id,
+            converted_at,
+            revenue_cents,
+            fcm_message_id,
+            user_agent,
+            ip_address
+          )
+          SELECT
+            campaign_id,
+            shop_domain,
+            subscriber_id,
+            target_url,
+            sent_at,
+            delivered_at,
+            clicked_at,
+            ${input.orderId},
+            ${occurredAt},
+            ${input.revenueCents},
+            fcm_message_id,
+            user_agent,
+            ip_address
+          FROM campaign_deliveries
+          WHERE id = ${touch.id}
+          LIMIT 1
+        `;
+      }
     }
 
     await sql`
@@ -7826,7 +7900,7 @@ export const recordAttributedConversion = async (input: RecordConversionInput) =
             revenue_cents
           )
           SELECT
-            automation_job_id,
+            NULL,
             rule_key,
             shop_domain,
             subscriber_id,
