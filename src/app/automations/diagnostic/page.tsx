@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState } from 'react';
 
 import { useSearchParams } from 'next/navigation';
-import { AlertCircle, AlertTriangle, CheckCircle, Copy, Info, Loader2, RefreshCw } from 'lucide-react';
+import { AlertCircle, AlertTriangle, CheckCircle, Copy, Info, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -139,6 +139,13 @@ function DiagnosticPageContent() {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const clearDiagnostic = () => {
+    setDiagnostic(null);
+    setError(null);
+    setCopied(false);
+    setLoading(false);
+  };
+
   const fetchDiagnostic = async () => {
     if (!shop) {
       return;
@@ -230,12 +237,24 @@ function DiagnosticPageContent() {
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
+          <Button variant="outline" size="sm" onClick={clearDiagnostic} disabled={!diagnostic && !error && !copied}>
+            <Trash2 className="mr-2 h-4 w-4" />
+            Remove old report
+          </Button>
           <Button size="sm" onClick={copyDiagnostic} disabled={!diagnostic}>
             <Copy className="mr-2 h-4 w-4" />
             {copied ? 'Copied' : 'Copy diagnostic JSON'}
           </Button>
         </div>
       </div>
+
+      {!diagnostic && !loading && !error && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>Report cleared</AlertTitle>
+          <AlertDescription>Use Refresh after you rerun the abandoned-cart flow to generate a new diagnostic report.</AlertDescription>
+        </Alert>
+      )}
 
       {loading && (
         <Card>
