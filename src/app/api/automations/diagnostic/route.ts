@@ -794,3 +794,37 @@ export async function POST() {
     { status: 405 },
   );
 }
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const shopDomain = request.nextUrl.searchParams.get('shop')?.trim().toLowerCase();
+    if (!shopDomain) {
+      return NextResponse.json({ ok: false, error: 'Missing shop parameter.' }, { status: 400 });
+    }
+
+    const sql = getNeonSql();
+
+    const [deletedJobsResult] = await Promise.all([
+      sql`
+        DELETE FROM automation_jobs
+        WHERE shop_domain = ${shopDomain}
+          AND rule_key = 'cart_abandonment_30m'
+          AND status IN ('failed', 'skipped')
+        RETURNING id
+      `,
+    ]);
+
+    return NextResponse.json({
+      ok: true,
+      deletedJobs: Array.isArray(deletedJobsResult) ? deletedJobsResult.length : 0,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Failed to clear diagnostic report.',
+      },
+      { status: 500 },
+    );
+  }
+}

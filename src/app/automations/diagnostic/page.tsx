@@ -139,7 +139,20 @@ function DiagnosticPageContent() {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const clearDiagnostic = () => {
+  const [clearing, setClearing] = useState(false);
+
+  const clearDiagnostic = async () => {
+    if (!shop) {
+      return;
+    }
+    setClearing(true);
+    try {
+      await fetch(`/api/automations/diagnostic?shop=${encodeURIComponent(shop)}`, { method: 'DELETE' });
+    } catch {
+      // swallow network errors — still clear local state
+    } finally {
+      setClearing(false);
+    }
     setDiagnostic(null);
     setError(null);
     setCopied(false);
@@ -237,9 +250,9 @@ function DiagnosticPageContent() {
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
-          <Button variant="outline" size="sm" onClick={clearDiagnostic} disabled={!diagnostic && !error && !copied}>
-            <Trash2 className="mr-2 h-4 w-4" />
-            Remove old report
+          <Button variant="outline" size="sm" onClick={clearDiagnostic} disabled={clearing || (!diagnostic && !error && !copied)}>
+            {clearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
+            {clearing ? 'Clearing...' : 'Remove old report'}
           </Button>
           <Button size="sm" onClick={copyDiagnostic} disabled={!diagnostic}>
             <Copy className="mr-2 h-4 w-4" />
