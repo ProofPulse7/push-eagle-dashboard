@@ -2342,6 +2342,110 @@ const listAutomationTargets = async (input: { shopDomain: string; externalId?: s
   }));
 };
 
+const extractClientIdFromMetadata = (metadata?: Record<string, unknown> | null) => {
+  const raw = metadata && typeof metadata.clientId === 'string'
+    ? metadata.clientId
+    : null;
+  const normalized = String(raw ?? '').trim();
+  return normalized || null;
+};
+
+const listLinkedExternalIdsForActivity = async (input: {
+  shopDomain: string;
+  externalId: string;
+  cartToken?: string | null;
+  clientId?: string | null;
+}) => {
+  const sql = getNeonSql();
+  const rows = await sql`
+    WITH candidates AS (
+      SELECT external_id, created_at
+      FROM subscriber_activity_events
+      WHERE shop_domain = ${input.shopDomain}
+        AND external_id IS NOT NULL
+        AND external_id <> ''
+        AND created_at >= NOW() - INTERVAL '30 days'
+        AND (
+          external_id = ${input.externalId}
+          OR (${input.cartToken ?? null} IS NOT NULL AND cart_token = ${input.cartToken ?? null})
+          OR (${input.clientId ?? null} IS NOT NULL AND COALESCE(metadata ->> 'clientId', '') = ${input.clientId ?? null})
+        )
+
+      UNION ALL
+
+      SELECT external_id, created_at
+      FROM pixel_events
+      WHERE shop_domain = ${input.shopDomain}
+        AND external_id IS NOT NULL
+        AND external_id <> ''
+        AND created_at >= NOW() - INTERVAL '30 days'
+        AND (
+          external_id = ${input.externalId}
+          OR (${input.cartToken ?? null} IS NOT NULL AND cart_token = ${input.cartToken ?? null})
+          OR (${input.clientId ?? null} IS NOT NULL AND COALESCE(client_id, '') = ${input.clientId ?? null})
+        )
+    ),
+    dedup AS (
+      SELECT
+        external_id,
+        MAX(created_at) AS last_seen_at,
+        MIN(
+          CASE
+            WHEN external_id = ${input.externalId} THEN 0
+            WHEN external_id LIKE 'anon:%' THEN 1
+            WHEN external_id LIKE 'shopify_customer:%' THEN 2
+            WHEN external_id LIKE 'email:%' THEN 3
+            WHEN external_id LIKE 'px:%' THEN 4
+            WHEN external_id LIKE 'cart:%' THEN 5
+            ELSE 6
+          END
+        ) AS identity_rank
+      FROM candidates
+      GROUP BY external_id
+    )
+    SELECT external_id
+    FROM dedup
+    ORDER BY identity_rank ASC, last_seen_at DESC
+    LIMIT 20
+  `;
+
+  return rows
+    .map((row) => String(row.external_id ?? '').trim())
+    .filter(Boolean);
+};
+
+const resolveAutomationTargetsForActivity = async (input: {
+  shopDomain: string;
+  externalId: string;
+  cartToken?: string | null;
+  clientId?: string | null;
+}) => {
+  const candidateExternalIds = await listLinkedExternalIdsForActivity(input);
+  if (!candidateExternalIds.includes(input.externalId)) {
+    candidateExternalIds.unshift(input.externalId);
+  }
+
+  const resolved = [] as Array<{ tokenId: number; subscriberId: number | null; externalId: string | null }>;
+  const seenTokenIds = new Set<number>();
+
+  for (const externalId of candidateExternalIds) {
+    const targets = await listAutomationTargets({
+      shopDomain: input.shopDomain,
+      externalId,
+    });
+
+    for (const target of targets) {
+      if (seenTokenIds.has(target.tokenId)) {
+        continue;
+      }
+      seenTokenIds.add(target.tokenId);
+      resolved.push(target);
+    }
+  }
+
+  return resolved;
+};
+
 const enqueueAutomationForTargets = async (input: {
   shopDomain: string;
   ruleKey: AutomationRuleKey;
@@ -3890,7 +3994,12 @@ export const recordSubscriberActivity = async (input: {
     const rule = await getRuleConfig(input.shopDomain, 'cart_abandonment_30m');
     if (rule.enabled) {
       const cartConfig = parseCartRuleConfig(rule.config);
-      const targets = await listAutomationTargets({ shopDomain: input.shopDomain, externalId: input.externalId });
+      const targets = await resolveAutomationTargetsForActivity({
+        shopDomain: input.shopDomain,
+        externalId: input.externalId,
+        cartToken: input.cartToken ?? null,
+        clientId: extractClientIdFromMetadata(input.metadata),
+      });
 
       for (const stepKey of Object.keys(cartConfig.steps) as CartStepKey[]) {
         const step = cartConfig.steps[stepKey];
