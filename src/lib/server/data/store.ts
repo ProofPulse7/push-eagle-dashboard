@@ -2391,12 +2391,74 @@ const externalIdPriority = (externalId: string) => {
   return 5;
 };
 
+const buildExternalIdAliases = (input: {
+  shopDomain: string;
+  externalId?: string | null;
+  cartToken?: string | null;
+  clientId?: string | null;
+}) => {
+  const aliases = new Set<string>();
+
+  const addAlias = (value?: string | null) => {
+    const normalized = value == null ? '' : String(value).trim();
+    if (normalized) {
+      aliases.add(normalized);
+    }
+  };
+
+  const normalizedShopDomain = String(input.shopDomain || '').trim().toLowerCase();
+  const normalizedExternalId = input.externalId?.trim() || null;
+  const normalizedCartToken = input.cartToken?.trim() || null;
+  const normalizedClientId = input.clientId?.trim() || null;
+
+  addAlias(normalizedExternalId);
+
+  if (normalizedCartToken) {
+    addAlias(normalizedCartToken);
+    addAlias(`cart:${normalizedCartToken}`);
+    if (normalizedShopDomain) {
+      addAlias(`cart:${normalizedShopDomain}:${normalizedCartToken}`);
+    }
+  }
+
+  if (normalizedClientId) {
+    addAlias(normalizedClientId);
+    addAlias(`px:${normalizedClientId}`);
+    if (normalizedShopDomain) {
+      addAlias(`px:${normalizedShopDomain}:${normalizedClientId}`);
+    }
+  }
+
+  if (normalizedExternalId) {
+    const cartPrefix = normalizedShopDomain ? `cart:${normalizedShopDomain}:` : 'cart:';
+    if (normalizedExternalId.startsWith(cartPrefix)) {
+      const extractedCartToken = normalizedExternalId.slice(cartPrefix.length).trim();
+      if (extractedCartToken) {
+        addAlias(extractedCartToken);
+        addAlias(`cart:${extractedCartToken}`);
+      }
+    }
+
+    const pxPrefix = normalizedShopDomain ? `px:${normalizedShopDomain}:` : 'px:';
+    if (normalizedExternalId.startsWith(pxPrefix)) {
+      const extractedClientId = normalizedExternalId.slice(pxPrefix.length).trim();
+      if (extractedClientId) {
+        addAlias(extractedClientId);
+        addAlias(`px:${extractedClientId}`);
+      }
+    }
+  }
+
+  return Array.from(aliases);
+};
+
 const resolveAutomationExternalIds = async (input: {
   shopDomain: string;
   externalId?: string | null;
   cartToken?: string | null;
   clientId?: string | null;
 }) => {
+  const externalIdAliases = buildExternalIdAliases(input);
   const normalizedExternalId = input.externalId?.trim() || null;
   const normalizedCartToken = input.cartToken?.trim() || null;
   const normalizedClientId = input.clientId?.trim() || null;
@@ -2485,10 +2547,25 @@ const resolveAutomationExternalIds = async (input: {
     `
     : [];
 
+  const aliasRows = externalIdAliases.length > 0
+    ? await sql`
+      SELECT DISTINCT s.external_id
+      FROM subscribers s
+      JOIN subscriber_tokens t ON t.subscriber_id = s.id
+      WHERE s.shop_domain = ${input.shopDomain}
+        AND s.external_id = ANY(${externalIdAliases})
+        AND t.shop_domain = ${input.shopDomain}
+        AND t.status = 'active'
+      LIMIT 100
+    `
+    : [];
+
   const candidates = Array.from(
     new Set(
       [
+        ...externalIdAliases,
         normalizedExternalId,
+        ...aliasRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...cartRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...clientRows.map((row) => (row.external_id ? String(row.external_id) : null)),
       ].filter((value): value is string => Boolean(value)),
@@ -2507,7 +2584,7 @@ const resolveAutomationExternalIds = async (input: {
 const enqueueAutomationForTargets = async (input: {
   shopDomain: string;
   ruleKey: AutomationRuleKey;
-  targets: Array<{ tokenId: number; subscriberId: number | null }>;
+  targets: Array<{ tokenId: number; subscriberId: number | null; externalId?: string | null }>;
   dedupeKeyBase: string;
   dueAt?: Date;
   payload: AutomationJobPayload;
@@ -2523,6 +2600,7 @@ const enqueueAutomationForTargets = async (input: {
       payload: {
         ...input.payload,
         ruleKey: input.ruleKey,
+        externalId: target.externalId ?? input.payload.externalId ?? null,
       },
     });
   }
