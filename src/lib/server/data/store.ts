@@ -3586,11 +3586,6 @@ export const processAutomationJob = async (jobId: string) => {
       const payloadTriggeredAt = payloadTriggeredAtRaw && !Number.isNaN(Date.parse(payloadTriggeredAtRaw))
         ? new Date(payloadTriggeredAtRaw)
         : null;
-      const identityMatch = payloadExternalId ? sql`external_id = ${payloadExternalId}` : sql`FALSE`;
-      const cartMatch = payloadCartToken ? sql`cart_token = ${payloadCartToken}` : sql`FALSE`;
-      const deliveryExternalMatch = payloadExternalId ? sql`d.external_id = ${payloadExternalId}` : sql`FALSE`;
-      const deliveryCartMatch = payloadCartToken ? sql`j.payload ->> 'cartToken' = ${payloadCartToken}` : sql`FALSE`;
-      const deliverySubscriberMatch = claim.subscriber_id ? sql`d.subscriber_id = ${claim.subscriber_id}` : sql`FALSE`;
 
       if (!step?.enabled) {
         await sql`
@@ -3618,16 +3613,40 @@ export const processAutomationJob = async (jobId: string) => {
         },
       };
 
-      const checkoutCompletedRows = await sql`
-        SELECT id
-        FROM subscriber_activity_events
-        WHERE shop_domain = ${claim.shop_domain}
-          AND event_type = 'checkout_complete'
-          AND (${identityMatch} OR ${cartMatch})
-          ${payloadTriggeredAt ? sql`AND created_at >= ${payloadTriggeredAt}` : sql``}
-        ORDER BY created_at DESC
-        LIMIT 1
-      `;
+      const checkoutCompletedRows = payloadExternalId && payloadCartToken
+        ? await sql`
+          SELECT id
+          FROM subscriber_activity_events
+          WHERE shop_domain = ${claim.shop_domain}
+            AND event_type = 'checkout_complete'
+            AND (external_id = ${payloadExternalId} OR cart_token = ${payloadCartToken})
+            ${payloadTriggeredAt ? sql`AND created_at >= ${payloadTriggeredAt}` : sql``}
+          ORDER BY created_at DESC
+          LIMIT 1
+        `
+        : payloadExternalId
+          ? await sql`
+            SELECT id
+            FROM subscriber_activity_events
+            WHERE shop_domain = ${claim.shop_domain}
+              AND event_type = 'checkout_complete'
+              AND external_id = ${payloadExternalId}
+              ${payloadTriggeredAt ? sql`AND created_at >= ${payloadTriggeredAt}` : sql``}
+            ORDER BY created_at DESC
+            LIMIT 1
+          `
+          : payloadCartToken
+            ? await sql`
+              SELECT id
+              FROM subscriber_activity_events
+              WHERE shop_domain = ${claim.shop_domain}
+                AND event_type = 'checkout_complete'
+                AND cart_token = ${payloadCartToken}
+                ${payloadTriggeredAt ? sql`AND created_at >= ${payloadTriggeredAt}` : sql``}
+              ORDER BY created_at DESC
+              LIMIT 1
+            `
+            : [];
 
       if (checkoutCompletedRows[0]?.id) {
         await sql`
@@ -3641,17 +3660,95 @@ export const processAutomationJob = async (jobId: string) => {
       const stepIndex = cartStepOrder.indexOf(payloadStepKey as CartStepKey);
       if (stepIndex > 0) {
         const previousStepKey = cartStepOrder[stepIndex - 1];
-        const previousStepDeliveryRows = await sql`
-          SELECT d.automation_job_id
-          FROM automation_deliveries d
-          JOIN automation_jobs j ON j.id = d.automation_job_id
-          WHERE d.shop_domain = ${claim.shop_domain}
-            AND d.rule_key = 'cart_abandonment_30m'
-            AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
-            AND (${deliveryExternalMatch} OR ${deliveryCartMatch} OR ${deliverySubscriberMatch})
-          ORDER BY d.delivered_at DESC
-          LIMIT 1
-        `;
+        const previousStepDeliveryRows = payloadExternalId && payloadCartToken && claim.subscriber_id
+          ? await sql`
+            SELECT d.automation_job_id
+            FROM automation_deliveries d
+            JOIN automation_jobs j ON j.id = d.automation_job_id
+            WHERE d.shop_domain = ${claim.shop_domain}
+              AND d.rule_key = 'cart_abandonment_30m'
+              AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+              AND (
+                d.external_id = ${payloadExternalId}
+                OR j.payload ->> 'cartToken' = ${payloadCartToken}
+                OR d.subscriber_id = ${claim.subscriber_id}
+              )
+            ORDER BY d.delivered_at DESC
+            LIMIT 1
+          `
+          : payloadExternalId && payloadCartToken
+            ? await sql`
+              SELECT d.automation_job_id
+              FROM automation_deliveries d
+              JOIN automation_jobs j ON j.id = d.automation_job_id
+              WHERE d.shop_domain = ${claim.shop_domain}
+                AND d.rule_key = 'cart_abandonment_30m'
+                AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                AND (d.external_id = ${payloadExternalId} OR j.payload ->> 'cartToken' = ${payloadCartToken})
+              ORDER BY d.delivered_at DESC
+              LIMIT 1
+            `
+            : payloadExternalId && claim.subscriber_id
+              ? await sql`
+                SELECT d.automation_job_id
+                FROM automation_deliveries d
+                JOIN automation_jobs j ON j.id = d.automation_job_id
+                WHERE d.shop_domain = ${claim.shop_domain}
+                  AND d.rule_key = 'cart_abandonment_30m'
+                  AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                  AND (d.external_id = ${payloadExternalId} OR d.subscriber_id = ${claim.subscriber_id})
+                ORDER BY d.delivered_at DESC
+                LIMIT 1
+              `
+              : payloadCartToken && claim.subscriber_id
+                ? await sql`
+                  SELECT d.automation_job_id
+                  FROM automation_deliveries d
+                  JOIN automation_jobs j ON j.id = d.automation_job_id
+                  WHERE d.shop_domain = ${claim.shop_domain}
+                    AND d.rule_key = 'cart_abandonment_30m'
+                    AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                    AND (j.payload ->> 'cartToken' = ${payloadCartToken} OR d.subscriber_id = ${claim.subscriber_id})
+                  ORDER BY d.delivered_at DESC
+                  LIMIT 1
+                `
+                : payloadExternalId
+                  ? await sql`
+                    SELECT d.automation_job_id
+                    FROM automation_deliveries d
+                    JOIN automation_jobs j ON j.id = d.automation_job_id
+                    WHERE d.shop_domain = ${claim.shop_domain}
+                      AND d.rule_key = 'cart_abandonment_30m'
+                      AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                      AND d.external_id = ${payloadExternalId}
+                    ORDER BY d.delivered_at DESC
+                    LIMIT 1
+                  `
+                  : payloadCartToken
+                    ? await sql`
+                      SELECT d.automation_job_id
+                      FROM automation_deliveries d
+                      JOIN automation_jobs j ON j.id = d.automation_job_id
+                      WHERE d.shop_domain = ${claim.shop_domain}
+                        AND d.rule_key = 'cart_abandonment_30m'
+                        AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                        AND j.payload ->> 'cartToken' = ${payloadCartToken}
+                      ORDER BY d.delivered_at DESC
+                      LIMIT 1
+                    `
+                    : claim.subscriber_id
+                      ? await sql`
+                        SELECT d.automation_job_id
+                        FROM automation_deliveries d
+                        JOIN automation_jobs j ON j.id = d.automation_job_id
+                        WHERE d.shop_domain = ${claim.shop_domain}
+                          AND d.rule_key = 'cart_abandonment_30m'
+                          AND j.payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                          AND d.subscriber_id = ${claim.subscriber_id}
+                        ORDER BY d.delivered_at DESC
+                        LIMIT 1
+                      `
+                      : [];
 
         if (!previousStepDeliveryRows[0]?.automation_job_id) {
           const waitMessage = `Waiting for previous cart reminder step (${previousStepKey}) before sending ${payloadStepKey}.`;
@@ -3667,17 +3764,95 @@ export const processAutomationJob = async (jobId: string) => {
         }
       }
 
-      const existingStepDeliveryRows = await sql`
-        SELECT d.automation_job_id
-        FROM automation_deliveries d
-        JOIN automation_jobs j ON j.id = d.automation_job_id
-        WHERE d.shop_domain = ${claim.shop_domain}
-          AND d.rule_key = 'cart_abandonment_30m'
-          AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
-          AND (${deliveryExternalMatch} OR ${deliveryCartMatch} OR ${deliverySubscriberMatch})
-        ORDER BY d.delivered_at DESC
-        LIMIT 1
-      `;
+      const existingStepDeliveryRows = payloadExternalId && payloadCartToken && claim.subscriber_id
+        ? await sql`
+          SELECT d.automation_job_id
+          FROM automation_deliveries d
+          JOIN automation_jobs j ON j.id = d.automation_job_id
+          WHERE d.shop_domain = ${claim.shop_domain}
+            AND d.rule_key = 'cart_abandonment_30m'
+            AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+            AND (
+              d.external_id = ${payloadExternalId}
+              OR j.payload ->> 'cartToken' = ${payloadCartToken}
+              OR d.subscriber_id = ${claim.subscriber_id}
+            )
+          ORDER BY d.delivered_at DESC
+          LIMIT 1
+        `
+        : payloadExternalId && payloadCartToken
+          ? await sql`
+            SELECT d.automation_job_id
+            FROM automation_deliveries d
+            JOIN automation_jobs j ON j.id = d.automation_job_id
+            WHERE d.shop_domain = ${claim.shop_domain}
+              AND d.rule_key = 'cart_abandonment_30m'
+              AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+              AND (d.external_id = ${payloadExternalId} OR j.payload ->> 'cartToken' = ${payloadCartToken})
+            ORDER BY d.delivered_at DESC
+            LIMIT 1
+          `
+          : payloadExternalId && claim.subscriber_id
+            ? await sql`
+              SELECT d.automation_job_id
+              FROM automation_deliveries d
+              JOIN automation_jobs j ON j.id = d.automation_job_id
+              WHERE d.shop_domain = ${claim.shop_domain}
+                AND d.rule_key = 'cart_abandonment_30m'
+                AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+                AND (d.external_id = ${payloadExternalId} OR d.subscriber_id = ${claim.subscriber_id})
+              ORDER BY d.delivered_at DESC
+              LIMIT 1
+            `
+            : payloadCartToken && claim.subscriber_id
+              ? await sql`
+                SELECT d.automation_job_id
+                FROM automation_deliveries d
+                JOIN automation_jobs j ON j.id = d.automation_job_id
+                WHERE d.shop_domain = ${claim.shop_domain}
+                  AND d.rule_key = 'cart_abandonment_30m'
+                  AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+                  AND (j.payload ->> 'cartToken' = ${payloadCartToken} OR d.subscriber_id = ${claim.subscriber_id})
+                ORDER BY d.delivered_at DESC
+                LIMIT 1
+              `
+              : payloadExternalId
+                ? await sql`
+                  SELECT d.automation_job_id
+                  FROM automation_deliveries d
+                  JOIN automation_jobs j ON j.id = d.automation_job_id
+                  WHERE d.shop_domain = ${claim.shop_domain}
+                    AND d.rule_key = 'cart_abandonment_30m'
+                    AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+                    AND d.external_id = ${payloadExternalId}
+                  ORDER BY d.delivered_at DESC
+                  LIMIT 1
+                `
+                : payloadCartToken
+                  ? await sql`
+                    SELECT d.automation_job_id
+                    FROM automation_deliveries d
+                    JOIN automation_jobs j ON j.id = d.automation_job_id
+                    WHERE d.shop_domain = ${claim.shop_domain}
+                      AND d.rule_key = 'cart_abandonment_30m'
+                      AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+                      AND j.payload ->> 'cartToken' = ${payloadCartToken}
+                    ORDER BY d.delivered_at DESC
+                    LIMIT 1
+                  `
+                  : claim.subscriber_id
+                    ? await sql`
+                      SELECT d.automation_job_id
+                      FROM automation_deliveries d
+                      JOIN automation_jobs j ON j.id = d.automation_job_id
+                      WHERE d.shop_domain = ${claim.shop_domain}
+                        AND d.rule_key = 'cart_abandonment_30m'
+                        AND j.payload -> 'metadata' ->> 'stepKey' = ${payloadStepKey}
+                        AND d.subscriber_id = ${claim.subscriber_id}
+                      ORDER BY d.delivered_at DESC
+                      LIMIT 1
+                    `
+                    : [];
 
       if (existingStepDeliveryRows[0]?.automation_job_id) {
         await sql`
