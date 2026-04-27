@@ -2342,108 +2342,166 @@ const listAutomationTargets = async (input: { shopDomain: string; externalId?: s
   }));
 };
 
-const extractClientIdFromMetadata = (metadata?: Record<string, unknown> | null) => {
-  const raw = metadata && typeof metadata.clientId === 'string'
-    ? metadata.clientId
-    : null;
-  const normalized = String(raw ?? '').trim();
-  return normalized || null;
-};
+const listAutomationTargetsByExternalIds = async (shopDomain: string, externalIds: string[]) => {
+  if (externalIds.length === 0) {
+    return [] as Array<{ tokenId: number; subscriberId: number | null; externalId: string | null }>;
+  }
 
-const listLinkedExternalIdsForActivity = async (input: {
-  shopDomain: string;
-  externalId: string;
-  cartToken?: string | null;
-  clientId?: string | null;
-}) => {
   const sql = getNeonSql();
   const rows = await sql`
-    WITH candidates AS (
-      SELECT external_id, created_at
-      FROM subscriber_activity_events
-      WHERE shop_domain = ${input.shopDomain}
-        AND external_id IS NOT NULL
-        AND external_id <> ''
-        AND created_at >= NOW() - INTERVAL '30 days'
-        AND (
-          external_id = ${input.externalId}
-          OR (${input.cartToken ?? null} IS NOT NULL AND cart_token = ${input.cartToken ?? null})
-          OR (${input.clientId ?? null} IS NOT NULL AND COALESCE(metadata ->> 'clientId', '') = ${input.clientId ?? null})
-        )
-
-      UNION ALL
-
-      SELECT external_id, created_at
-      FROM pixel_events
-      WHERE shop_domain = ${input.shopDomain}
-        AND external_id IS NOT NULL
-        AND external_id <> ''
-        AND created_at >= NOW() - INTERVAL '30 days'
-        AND (
-          external_id = ${input.externalId}
-          OR (${input.cartToken ?? null} IS NOT NULL AND cart_token = ${input.cartToken ?? null})
-          OR (${input.clientId ?? null} IS NOT NULL AND COALESCE(client_id, '') = ${input.clientId ?? null})
-        )
-    ),
-    dedup AS (
+    WITH ranked AS (
       SELECT
-        external_id,
-        MAX(created_at) AS last_seen_at,
-        MIN(
-          CASE
-            WHEN external_id = ${input.externalId} THEN 0
-            WHEN external_id LIKE 'anon:%' THEN 1
-            WHEN external_id LIKE 'shopify_customer:%' THEN 2
-            WHEN external_id LIKE 'email:%' THEN 3
-            WHEN external_id LIKE 'px:%' THEN 4
-            WHEN external_id LIKE 'cart:%' THEN 5
-            ELSE 6
-          END
-        ) AS identity_rank
-      FROM candidates
-      GROUP BY external_id
+        t.id AS token_id,
+        s.id AS subscriber_id,
+        s.external_id,
+        ROW_NUMBER() OVER (
+          PARTITION BY s.external_id
+          ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC, t.id DESC
+        ) AS rn
+      FROM subscriber_tokens t
+      JOIN subscribers s ON s.id = t.subscriber_id
+      WHERE t.shop_domain = ${shopDomain}
+        AND s.external_id = ANY(${externalIds})
+        AND t.status = 'active'
     )
-    SELECT external_id
-    FROM dedup
-    ORDER BY identity_rank ASC, last_seen_at DESC
-    LIMIT 20
+    SELECT token_id, subscriber_id, external_id
+    FROM ranked
+    WHERE rn = 1
   `;
 
-  return rows
-    .map((row) => String(row.external_id ?? '').trim())
-    .filter(Boolean);
+  return rows.map((row) => ({
+    tokenId: Number(row.token_id),
+    subscriberId: row.subscriber_id ? Number(row.subscriber_id) : null,
+    externalId: row.external_id ? String(row.external_id) : null,
+  }));
 };
 
-const resolveAutomationTargetsForActivity = async (input: {
+const normalizeClientId = (metadata?: Record<string, unknown> | null) => {
+  const raw = metadata && typeof metadata.clientId === 'string' ? metadata.clientId : '';
+  const value = raw.trim();
+  return value.length > 0 ? value : null;
+};
+
+const externalIdPriority = (externalId: string) => {
+  if (externalId.startsWith('anon:')) return 0;
+  if (externalId.startsWith('shopify_customer:')) return 1;
+  if (externalId.startsWith('email:')) return 2;
+  if (externalId.startsWith('cart:')) return 3;
+  if (externalId.startsWith('px:')) return 4;
+  return 5;
+};
+
+const resolveAutomationExternalIds = async (input: {
   shopDomain: string;
-  externalId: string;
+  externalId?: string | null;
   cartToken?: string | null;
   clientId?: string | null;
 }) => {
-  const candidateExternalIds = await listLinkedExternalIdsForActivity(input);
-  if (!candidateExternalIds.includes(input.externalId)) {
-    candidateExternalIds.unshift(input.externalId);
-  }
+  const normalizedExternalId = input.externalId?.trim() || null;
+  const normalizedCartToken = input.cartToken?.trim() || null;
+  const normalizedClientId = input.clientId?.trim() || null;
 
-  const resolved = [] as Array<{ tokenId: number; subscriberId: number | null; externalId: string | null }>;
-  const seenTokenIds = new Set<number>();
+  const sql = getNeonSql();
+  const windowStart = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
 
-  for (const externalId of candidateExternalIds) {
-    const targets = await listAutomationTargets({
-      shopDomain: input.shopDomain,
-      externalId,
-    });
+  const cartRows = normalizedCartToken
+    ? await sql`
+      WITH cart_related AS (
+        SELECT
+          external_id,
+          created_at,
+          COALESCE(metadata ->> 'clientId', '') AS client_id
+        FROM subscriber_activity_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND cart_token = ${normalizedCartToken}
+          AND created_at >= ${windowStart}
 
-    for (const target of targets) {
-      if (seenTokenIds.has(target.tokenId)) {
-        continue;
-      }
-      seenTokenIds.add(target.tokenId);
-      resolved.push(target);
+        UNION ALL
+
+        SELECT
+          external_id,
+          created_at,
+          COALESCE(client_id, '') AS client_id
+        FROM pixel_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND cart_token = ${normalizedCartToken}
+          AND created_at >= ${windowStart}
+      ),
+      stitched AS (
+        SELECT external_id, created_at
+        FROM cart_related
+
+        UNION ALL
+
+        SELECT e.external_id, e.created_at
+        FROM subscriber_activity_events e
+        WHERE e.shop_domain = ${input.shopDomain}
+          AND e.created_at >= ${windowStart}
+          AND COALESCE(e.metadata ->> 'clientId', '') = ANY(
+            ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
+          )
+
+        UNION ALL
+
+        SELECT p.external_id, p.created_at
+        FROM pixel_events p
+        WHERE p.shop_domain = ${input.shopDomain}
+          AND p.created_at >= ${windowStart}
+          AND COALESCE(p.client_id, '') = ANY(
+            ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
+          )
+      )
+      SELECT external_id, created_at
+      FROM stitched
+      WHERE external_id IS NOT NULL
+        AND external_id <> ''
+      ORDER BY created_at DESC
+      LIMIT 100
+    `
+    : [];
+
+  const clientRows = normalizedClientId
+    ? await sql`
+      SELECT external_id, created_at
+      FROM (
+        SELECT external_id, created_at
+        FROM subscriber_activity_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND COALESCE(metadata ->> 'clientId', '') = ${normalizedClientId}
+          AND created_at >= ${windowStart}
+
+        UNION ALL
+
+        SELECT external_id, created_at
+        FROM pixel_events
+        WHERE shop_domain = ${input.shopDomain}
+          AND COALESCE(client_id, '') = ${normalizedClientId}
+          AND created_at >= ${windowStart}
+      ) stitched
+      WHERE external_id IS NOT NULL
+        AND external_id <> ''
+      ORDER BY created_at DESC
+      LIMIT 100
+    `
+    : [];
+
+  const candidates = Array.from(
+    new Set(
+      [
+        normalizedExternalId,
+        ...cartRows.map((row) => (row.external_id ? String(row.external_id) : null)),
+        ...clientRows.map((row) => (row.external_id ? String(row.external_id) : null)),
+      ].filter((value): value is string => Boolean(value)),
+    ),
+  );
+
+  return candidates.sort((a, b) => {
+    const priorityDelta = externalIdPriority(a) - externalIdPriority(b);
+    if (priorityDelta !== 0) {
+      return priorityDelta;
     }
-  }
-
-  return resolved;
+    return a.localeCompare(b);
+  });
 };
 
 const enqueueAutomationForTargets = async (input: {
@@ -3994,12 +4052,21 @@ export const recordSubscriberActivity = async (input: {
     const rule = await getRuleConfig(input.shopDomain, 'cart_abandonment_30m');
     if (rule.enabled) {
       const cartConfig = parseCartRuleConfig(rule.config);
-      const targets = await resolveAutomationTargetsForActivity({
-        shopDomain: input.shopDomain,
-        externalId: input.externalId,
-        cartToken: input.cartToken ?? null,
-        clientId: extractClientIdFromMetadata(input.metadata),
-      });
+      const clientId = normalizeClientId(input.metadata);
+      let targets = await listAutomationTargets({ shopDomain: input.shopDomain, externalId: input.externalId });
+
+      if (targets.length === 0) {
+        const externalIdCandidates = await resolveAutomationExternalIds({
+          shopDomain: input.shopDomain,
+          externalId: input.externalId,
+          cartToken: input.cartToken,
+          clientId,
+        });
+
+        if (externalIdCandidates.length > 0) {
+          targets = await listAutomationTargetsByExternalIds(input.shopDomain, externalIdCandidates);
+        }
+      }
 
       for (const stepKey of Object.keys(cartConfig.steps) as CartStepKey[]) {
         const step = cartConfig.steps[stepKey];

@@ -10,7 +10,6 @@ type ShopifyCartPayload = {
   id?: number | string;
   token?: string | null;
   updated_at?: string | null;
-  attributes?: Record<string, unknown> | Array<{ key?: string | null; name?: string | null; value?: unknown }> | null;
   line_items?: Array<{
     product_id?: number | string | null;
     variant_id?: number | string | null;
@@ -25,43 +24,6 @@ const deriveExternalId = (shopDomain: string, token?: string | null) => {
   }
 
   return `cart:${shopDomain}:${token}`;
-};
-
-const getCartAttributeValue = (
-  attributes: ShopifyCartPayload['attributes'],
-  keys: string[],
-) => {
-  if (!attributes) {
-    return null;
-  }
-
-  const normalizedKeys = new Set(keys.map((key) => key.trim().toLowerCase()));
-
-  if (Array.isArray(attributes)) {
-    for (const item of attributes) {
-      const rawKey = String(item?.key ?? item?.name ?? '').trim().toLowerCase();
-      if (!normalizedKeys.has(rawKey)) {
-        continue;
-      }
-      const value = String(item?.value ?? '').trim();
-      if (value) {
-        return value;
-      }
-    }
-    return null;
-  }
-
-  for (const [key, rawValue] of Object.entries(attributes)) {
-    if (!normalizedKeys.has(String(key).trim().toLowerCase())) {
-      continue;
-    }
-    const value = String(rawValue ?? '').trim();
-    if (value) {
-      return value;
-    }
-  }
-
-  return null;
 };
 
 export async function POST(request: Request) {
@@ -89,18 +51,7 @@ export async function POST(request: Request) {
       }
     }
 
-    const externalIdFromAttributes = getCartAttributeValue(payload.attributes, [
-      '_push_eagle_external_id',
-      'push_eagle_external_id',
-      'pe_external_id',
-    ]);
-    const clientIdFromAttributes = getCartAttributeValue(payload.attributes, [
-      '_push_eagle_client_id',
-      'push_eagle_client_id',
-      'pe_client_id',
-    ]);
-
-    const externalId = externalIdFromAttributes ?? deriveExternalId(shopDomain, payload.token ?? null);
+    const externalId = deriveExternalId(shopDomain, payload.token ?? null);
     if (!externalId) {
       return NextResponse.json({ ok: true, shopDomain, skipped: 'missing-token' });
     }
@@ -118,7 +69,6 @@ export async function POST(request: Request) {
         variantId: firstLineItem?.variant_id ? String(firstLineItem.variant_id) : null,
         quantity: firstLineItem?.quantity ?? null,
         updatedAt: payload.updated_at ?? null,
-        clientId: clientIdFromAttributes ?? null,
       },
     });
 

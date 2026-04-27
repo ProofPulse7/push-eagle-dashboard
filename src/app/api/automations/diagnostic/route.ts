@@ -125,7 +125,6 @@ export async function GET(request: NextRequest) {
       lagRows,
       failedRows,
       cartRuleRows,
-      activitySignalRows,
     ] = await Promise.all([
       sql`
         SELECT
@@ -224,15 +223,6 @@ export async function GET(request: NextRequest) {
         WHERE shop_domain = ${shopDomain}
           AND rule_key = 'cart_abandonment_30m'
         LIMIT 1
-      `,
-      sql`
-        SELECT
-          COUNT(*) FILTER (WHERE event_type = 'add_to_cart' AND created_at >= NOW() - INTERVAL '24 hours')::INT AS add_to_cart_24h,
-          COUNT(*) FILTER (WHERE event_type = 'checkout_start' AND created_at >= NOW() - INTERVAL '24 hours')::INT AS checkout_start_24h,
-          COUNT(*) FILTER (WHERE event_type = 'add_to_cart' AND created_at >= NOW() - INTERVAL '7 days')::INT AS add_to_cart_7d,
-          COUNT(*) FILTER (WHERE event_type = 'checkout_start' AND created_at >= NOW() - INTERVAL '7 days')::INT AS checkout_start_7d
-        FROM subscriber_activity_events
-        WHERE shop_domain = ${shopDomain}
       `,
     ]);
 
@@ -409,16 +399,6 @@ export async function GET(request: NextRequest) {
       reminder3: failedByStep['cart-reminder-3'],
     };
 
-    const activitySignals = activitySignalRows[0] as Record<string, unknown> | undefined;
-    const addToCart24h = Number(activitySignals?.add_to_cart_24h ?? 0);
-    const checkoutStart24h = Number(activitySignals?.checkout_start_24h ?? 0);
-    const addToCart7d = Number(activitySignals?.add_to_cart_7d ?? 0);
-    const checkoutStart7d = Number(activitySignals?.checkout_start_7d ?? 0);
-
-    const deliveredTotal = summary.reminder1.delivered + summary.reminder2.delivered + summary.reminder3.delivered;
-    const queuedTotal = summary.reminder1.pending + summary.reminder2.pending + summary.reminder3.pending
-      + summary.reminder1.processing + summary.reminder2.processing + summary.reminder3.processing;
-
     const inferredIssues: string[] = [];
 
     if (!cronHealth.processAutomations.lastRunAt) {
@@ -436,14 +416,6 @@ export async function GET(request: NextRequest) {
     const cartFailedTotal = summary.reminder1.failed + summary.reminder2.failed + summary.reminder3.failed;
     if (cartFailedTotal > 0) {
       inferredIssues.push('Some cart reminder jobs are failing; review recent failed reasons per step.');
-    }
-
-    if (addToCart24h === 0 && checkoutStart24h === 0) {
-      inferredIssues.push('No recent add_to_cart or checkout_start activity was recorded in the last 24h. Trigger ingestion may be missing.');
-    }
-
-    if (addToCart7d === 0 && checkoutStart7d === 0 && deliveredTotal === 0 && queuedTotal === 0) {
-      inferredIssues.push('No abandoned-cart trigger activity was observed in 7d, so reminder steps were never queued.');
     }
 
     const delayedR2 = lagSamples.reminder2.filter((value) => value >= 2).length;
@@ -510,23 +482,6 @@ export async function GET(request: NextRequest) {
         title: 'Abandoned-cart queue is healthy',
         description: 'No overdue pending abandoned-cart jobs are currently detected.',
         details: automationQueueHealth,
-      });
-    }
-
-    if (addToCart24h === 0 && checkoutStart24h === 0) {
-      issues.push({
-        severity: 'warning',
-        component: 'AbandonedCartSignals',
-        title: 'No recent abandoned-cart trigger signals detected',
-        description: 'No add_to_cart or checkout_start activity was observed in the last 24h; reminders cannot enqueue without trigger events.',
-        details: {
-          addToCart24h,
-          checkoutStart24h,
-          addToCart7d,
-          checkoutStart7d,
-          queuedTotal,
-          deliveredTotal,
-        },
       });
     }
 
