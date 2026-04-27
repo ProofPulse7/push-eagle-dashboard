@@ -3128,6 +3128,52 @@ export const listDueAutomationJobs = async (limit = 100, shardCount = 1, shardIn
   }>;
 };
 
+export const listDueAutomationJobsByRule = async (
+  ruleKey: AutomationRuleKey,
+  limit = 100,
+  shardCount = 1,
+  shardIndex = 0,
+) => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  const safeShardCount = Math.max(1, Math.min(Number(shardCount) || 1, 128));
+  const safeShardIndex = Math.max(0, Math.min(Number(shardIndex) || 0, safeShardCount - 1));
+
+  // If a worker crashed mid-flight, move stale processing jobs for this rule back to pending.
+  await sql`
+    UPDATE automation_jobs
+    SET status = 'pending', updated_at = NOW()
+    WHERE status = 'processing'
+      AND rule_key = ${ruleKey}
+      AND updated_at < NOW() - INTERVAL '2 minutes'
+  `;
+
+  const rows = await sql`
+    SELECT j.id, j.shop_domain, j.rule_key, j.token_id, j.subscriber_id, j.payload, t.fcm_token
+    FROM automation_jobs j
+    LEFT JOIN subscriber_tokens t ON t.id = j.token_id
+    WHERE j.status = 'pending'
+      AND j.rule_key = ${ruleKey}
+      AND j.due_at <= NOW()
+      AND (
+        ${safeShardCount} = 1
+        OR MOD(ABS(hashtext(j.id)), ${safeShardCount}) = ${safeShardIndex}
+      )
+    ORDER BY j.due_at ASC
+    LIMIT ${limit}
+  `;
+
+  return rows as Array<{
+    id: string;
+    shop_domain: string;
+    rule_key: string;
+    token_id: number | null;
+    subscriber_id: number | null;
+    payload: AutomationJobPayload;
+    fcm_token: string | null;
+  }>;
+};
+
 export const processDueAutomationJobsForShop = async (shopDomain: string, limit = 50, maxConcurrent = 10) => {
   await ensureSchema();
   const sql = getNeonSql();

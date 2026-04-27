@@ -47,6 +47,7 @@ type DiagnosticResult = {
   };
   cronHealth: {
     processAutomations: CronJobHealth;
+    processAbandonedCart: CronJobHealth;
     processIngestion: CronJobHealth;
     processCampaigns: CronJobHealth;
   };
@@ -73,6 +74,16 @@ type DiagnosticResult = {
       reminder1: string[];
       reminder2: string[];
       reminder3: string[];
+    };
+    coreSignals: {
+      addToCartEventsLast2Hours: number;
+      addToCartExternalIdsLast2Hours: number;
+      checkoutCompleteEventsLast2Hours: number;
+      cartJobsCreatedLast2Hours: number;
+      cartJobsMissingStepKeyLast2Hours: number;
+      addToCartExternalIdsWithDirectActiveTokenMatch: number;
+      addToCartExternalIdsWithoutDirectActiveTokenMatch: number;
+      cartRuleEnabled: boolean;
     };
   };
 };
@@ -125,6 +136,9 @@ export async function GET(request: NextRequest) {
       lagRows,
       failedRows,
       cartRuleRows,
+      activityRows,
+      cartWindowRows,
+      tokenCoverageRows,
     ] = await Promise.all([
       sql`
         SELECT
@@ -150,7 +164,7 @@ export async function GET(request: NextRequest) {
               AND started_at >= NOW() - INTERVAL '1 hour'
           )::INT AS errors_last_hour
         FROM cron_heartbeats
-        WHERE job_name IN ('process_automations', 'process_ingestion', 'process_campaigns')
+        WHERE job_name IN ('process_automations', 'process_abandoned_cart', 'process_ingestion', 'process_campaigns')
           AND started_at >= NOW() - INTERVAL '7 days'
         GROUP BY job_name
       `,
@@ -218,11 +232,63 @@ export async function GET(request: NextRequest) {
         LIMIT 60
       `,
       sql`
-        SELECT config
+        SELECT enabled, config
         FROM automation_rules
         WHERE shop_domain = ${shopDomain}
           AND rule_key = 'cart_abandonment_30m'
         LIMIT 1
+      `,
+      sql`
+        SELECT
+          COUNT(*) FILTER (
+            WHERE event_type = 'add_to_cart'
+              AND created_at >= NOW() - INTERVAL '2 hours'
+          )::INT AS add_to_cart_events_2h,
+          COUNT(DISTINCT external_id) FILTER (
+            WHERE event_type = 'add_to_cart'
+              AND created_at >= NOW() - INTERVAL '2 hours'
+          )::INT AS add_to_cart_external_ids_2h,
+          COUNT(*) FILTER (
+            WHERE event_type = 'checkout_complete'
+              AND created_at >= NOW() - INTERVAL '2 hours'
+          )::INT AS checkout_complete_events_2h
+        FROM subscriber_activity_events
+        WHERE shop_domain = ${shopDomain}
+      `,
+      sql`
+        SELECT
+          COUNT(*) FILTER (
+            WHERE rule_key = 'cart_abandonment_30m'
+              AND created_at >= NOW() - INTERVAL '2 hours'
+          )::INT AS cart_jobs_created_2h,
+          COUNT(*) FILTER (
+            WHERE rule_key = 'cart_abandonment_30m'
+              AND created_at >= NOW() - INTERVAL '2 hours'
+              AND COALESCE(payload -> 'metadata' ->> 'stepKey', '') = ''
+          )::INT AS cart_jobs_missing_step_2h
+        FROM automation_jobs
+        WHERE shop_domain = ${shopDomain}
+      `,
+      sql`
+        WITH cart_external_ids AS (
+          SELECT DISTINCT external_id
+          FROM subscriber_activity_events
+          WHERE shop_domain = ${shopDomain}
+            AND event_type = 'add_to_cart'
+            AND created_at >= NOW() - INTERVAL '2 hours'
+            AND external_id IS NOT NULL
+            AND external_id <> ''
+        ),
+        matched_external_ids AS (
+          SELECT c.external_id
+          FROM cart_external_ids c
+          JOIN subscribers s ON s.shop_domain = ${shopDomain} AND s.external_id = c.external_id
+          JOIN subscriber_tokens t ON t.shop_domain = ${shopDomain} AND t.subscriber_id = s.id AND t.status = 'active'
+          GROUP BY c.external_id
+        )
+        SELECT
+          (SELECT COUNT(*)::INT FROM cart_external_ids) AS cart_external_ids,
+          (SELECT COUNT(*)::INT FROM matched_external_ids) AS matched_external_ids
       `,
     ]);
 
@@ -271,6 +337,7 @@ export async function GET(request: NextRequest) {
 
     const cronHealth: DiagnosticResult['cronHealth'] = {
       processAutomations: toCronHealth('process_automations'),
+      processAbandonedCart: toCronHealth('process_abandoned_cart'),
       processIngestion: toCronHealth('process_ingestion'),
       processCampaigns: toCronHealth('process_campaigns'),
     };
@@ -332,6 +399,7 @@ export async function GET(request: NextRequest) {
     const stepConfigRaw = (cartRuleRows[0]?.config as Record<string, unknown> | null)?.steps as
       | Record<string, { enabled?: boolean; delayMinutes?: number }>
       | undefined;
+    const cartRuleEnabled = Boolean(cartRuleRows[0]?.enabled);
 
     const stepConfig: DiagnosticResult['abandonedCartDiagnostics']['stepConfig'] = {
       reminder1: {
@@ -399,10 +467,55 @@ export async function GET(request: NextRequest) {
       reminder3: failedByStep['cart-reminder-3'],
     };
 
+    const activityRow = activityRows[0] as Record<string, unknown> | undefined;
+    const cartWindowRow = cartWindowRows[0] as Record<string, unknown> | undefined;
+    const tokenCoverageRow = tokenCoverageRows[0] as Record<string, unknown> | undefined;
+
+    const coreSignals: DiagnosticResult['abandonedCartDiagnostics']['coreSignals'] = {
+      addToCartEventsLast2Hours: Number(activityRow?.add_to_cart_events_2h ?? 0),
+      addToCartExternalIdsLast2Hours: Number(activityRow?.add_to_cart_external_ids_2h ?? 0),
+      checkoutCompleteEventsLast2Hours: Number(activityRow?.checkout_complete_events_2h ?? 0),
+      cartJobsCreatedLast2Hours: Number(cartWindowRow?.cart_jobs_created_2h ?? 0),
+      cartJobsMissingStepKeyLast2Hours: Number(cartWindowRow?.cart_jobs_missing_step_2h ?? 0),
+      addToCartExternalIdsWithDirectActiveTokenMatch: Number(tokenCoverageRow?.matched_external_ids ?? 0),
+      addToCartExternalIdsWithoutDirectActiveTokenMatch: Math.max(
+        0,
+        Number(tokenCoverageRow?.cart_external_ids ?? 0) - Number(tokenCoverageRow?.matched_external_ids ?? 0),
+      ),
+      cartRuleEnabled,
+    };
+
     const inferredIssues: string[] = [];
+
+    if (!cartRuleEnabled) {
+      inferredIssues.push('Abandoned-cart rule is disabled, so add_to_cart events will not create reminders.');
+    }
 
     if (!cronHealth.processAutomations.lastRunAt) {
       inferredIssues.push('Automation cron has never run, so delayed cart reminders will wait for fallback traffic.');
+    }
+
+    if (!cronHealth.processAbandonedCart.lastRunAt) {
+      inferredIssues.push('Dedicated abandoned-cart cron has not run yet; cart automation currently depends on shared automation workers.');
+    }
+
+    if (
+      cartRuleEnabled
+      && coreSignals.addToCartEventsLast2Hours > 0
+      && coreSignals.cartJobsCreatedLast2Hours === 0
+    ) {
+      inferredIssues.push('Add-to-cart activity is present but no abandoned-cart jobs were created in the last 2 hours.');
+    }
+
+    if (
+      coreSignals.addToCartExternalIdsLast2Hours > 0
+      && coreSignals.addToCartExternalIdsWithoutDirectActiveTokenMatch > 0
+    ) {
+      inferredIssues.push('Some add_to_cart identities have no direct active token match; identity stitching is required for these shoppers.');
+    }
+
+    if (coreSignals.cartJobsMissingStepKeyLast2Hours > 0) {
+      inferredIssues.push('Some abandoned-cart jobs were created without a stepKey; these jobs will not be counted per reminder step.');
     }
 
     if ((automationQueueHealth.abandonedCartDueNowJobs ?? 0) > 0) {
@@ -437,6 +550,7 @@ export async function GET(request: NextRequest) {
       sendLagDiagnostics,
       inferredIssues,
       recentFailedReasons,
+      coreSignals,
     };
 
     const issues: DiagnosticIssue[] = [];
@@ -464,6 +578,42 @@ export async function GET(request: NextRequest) {
         title: 'Automation cron heartbeat is healthy',
         description: 'process_automations is running within expected cadence.',
         details: cronHealth.processAutomations,
+      });
+    }
+
+    if (!cronHealth.processAbandonedCart.lastRunAt) {
+      issues.push({
+        severity: 'warning',
+        component: 'AbandonedCartCron',
+        title: 'Dedicated abandoned-cart cron is not running yet',
+        description: 'Cart reminders are currently processed only by shared automation workers.',
+        details: cronHealth.processAbandonedCart,
+      });
+    } else if ((cronHealth.processAbandonedCart.minutesSinceLastRun ?? 9999) > 3) {
+      issues.push({
+        severity: 'warning',
+        component: 'AbandonedCartCron',
+        title: 'Dedicated abandoned-cart cron heartbeat is stale',
+        description: 'Cart-only worker has not run recently enough for timely cart reminder processing.',
+        details: cronHealth.processAbandonedCart,
+      });
+    } else {
+      issues.push({
+        severity: 'info',
+        component: 'AbandonedCartCron',
+        title: 'Dedicated abandoned-cart cron heartbeat is healthy',
+        description: 'Cart-only worker is running within expected cadence.',
+        details: cronHealth.processAbandonedCart,
+      });
+    }
+
+    if (cartRuleEnabled && coreSignals.addToCartEventsLast2Hours > 0 && coreSignals.cartJobsCreatedLast2Hours === 0) {
+      issues.push({
+        severity: 'error',
+        component: 'AbandonedCartEnqueue',
+        title: 'Add-to-cart events are not turning into cart reminder jobs',
+        description: 'Core enqueue path issue: activity exists but abandoned-cart jobs were not created.',
+        details: coreSignals,
       });
     }
 
@@ -545,6 +695,13 @@ export async function GET(request: NextRequest) {
             minutesSinceLastRun: null,
             errorsLastHour: 0,
           },
+          processAbandonedCart: {
+            lastRunAt: null,
+            lastOkAt: null,
+            lastErrorAt: null,
+            minutesSinceLastRun: null,
+            errorsLastHour: 0,
+          },
           processIngestion: {
             lastRunAt: null,
             lastOkAt: null,
@@ -610,6 +767,16 @@ export async function GET(request: NextRequest) {
             reminder1: [],
             reminder2: [],
             reminder3: [],
+          },
+          coreSignals: {
+            addToCartEventsLast2Hours: 0,
+            addToCartExternalIdsLast2Hours: 0,
+            checkoutCompleteEventsLast2Hours: 0,
+            cartJobsCreatedLast2Hours: 0,
+            cartJobsMissingStepKeyLast2Hours: 0,
+            addToCartExternalIdsWithDirectActiveTokenMatch: 0,
+            addToCartExternalIdsWithoutDirectActiveTokenMatch: 0,
+            cartRuleEnabled: false,
           },
         },
       } satisfies DiagnosticResult,

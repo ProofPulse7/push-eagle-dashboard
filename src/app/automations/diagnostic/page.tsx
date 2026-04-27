@@ -43,6 +43,13 @@ type DiagnosticResult = {
       minutesSinceLastRun: number | null;
       errorsLastHour: number;
     };
+    processAbandonedCart: {
+      lastRunAt: string | null;
+      lastOkAt: string | null;
+      lastErrorAt: string | null;
+      minutesSinceLastRun: number | null;
+      errorsLastHour: number;
+    };
     processIngestion: {
       lastRunAt: string | null;
       lastOkAt: string | null;
@@ -108,6 +115,16 @@ type DiagnosticResult = {
       reminder1: string[];
       reminder2: string[];
       reminder3: string[];
+    };
+    coreSignals: {
+      addToCartEventsLast2Hours: number;
+      addToCartExternalIdsLast2Hours: number;
+      checkoutCompleteEventsLast2Hours: number;
+      cartJobsCreatedLast2Hours: number;
+      cartJobsMissingStepKeyLast2Hours: number;
+      addToCartExternalIdsWithDirectActiveTokenMatch: number;
+      addToCartExternalIdsWithoutDirectActiveTokenMatch: number;
+      cartRuleEnabled: boolean;
     };
   };
 };
@@ -371,6 +388,14 @@ function DiagnosticPageContent() {
                   <div>errorsLastHour={diagnostic.cronHealth.processAutomations.errorsLastHour}</div>
                 </div>
                 <div className="rounded-lg border p-3">
+                  <div className="font-medium">process_abandoned_cart</div>
+                  <div>lastRunAt={diagnostic.cronHealth.processAbandonedCart.lastRunAt ?? 'none'}</div>
+                  <div>lastOkAt={diagnostic.cronHealth.processAbandonedCart.lastOkAt ?? 'none'}</div>
+                  <div>lastErrorAt={diagnostic.cronHealth.processAbandonedCart.lastErrorAt ?? 'none'}</div>
+                  <div>minutesSinceLastRun={diagnostic.cronHealth.processAbandonedCart.minutesSinceLastRun ?? 'n/a'}</div>
+                  <div>errorsLastHour={diagnostic.cronHealth.processAbandonedCart.errorsLastHour}</div>
+                </div>
+                <div className="rounded-lg border p-3">
                   <div>pendingJobs={diagnostic.automationQueueHealth.pendingJobs}</div>
                   <div>processingJobs={diagnostic.automationQueueHealth.processingJobs}</div>
                   <div>failedJobs={diagnostic.automationQueueHealth.failedJobs}</div>
@@ -398,6 +423,18 @@ function DiagnosticPageContent() {
                   ))}
                 </ul>
               )}
+
+              <div className="rounded-lg border p-3">
+                <div className="mb-2 font-medium">Core signals (last 2 hours)</div>
+                <div>cartRuleEnabled={diagnostic.abandonedCartDiagnostics.coreSignals.cartRuleEnabled ? 'yes' : 'no'}</div>
+                <div>addToCartEvents={diagnostic.abandonedCartDiagnostics.coreSignals.addToCartEventsLast2Hours}</div>
+                <div>addToCartExternalIds={diagnostic.abandonedCartDiagnostics.coreSignals.addToCartExternalIdsLast2Hours}</div>
+                <div>checkoutCompleteEvents={diagnostic.abandonedCartDiagnostics.coreSignals.checkoutCompleteEventsLast2Hours}</div>
+                <div>cartJobsCreated={diagnostic.abandonedCartDiagnostics.coreSignals.cartJobsCreatedLast2Hours}</div>
+                <div>cartJobsMissingStepKey={diagnostic.abandonedCartDiagnostics.coreSignals.cartJobsMissingStepKeyLast2Hours}</div>
+                <div>externalIdsWithDirectActiveTokenMatch={diagnostic.abandonedCartDiagnostics.coreSignals.addToCartExternalIdsWithDirectActiveTokenMatch}</div>
+                <div>externalIdsWithoutDirectActiveTokenMatch={diagnostic.abandonedCartDiagnostics.coreSignals.addToCartExternalIdsWithoutDirectActiveTokenMatch}</div>
+              </div>
 
               <div className="grid gap-3 md:grid-cols-3">
                 <div className="rounded-lg border p-3">
