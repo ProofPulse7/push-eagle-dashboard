@@ -2560,6 +2560,23 @@ const resolveAutomationExternalIds = async (input: {
     `
     : [];
 
+  // Fallback: if we have a cartToken but found no candidates through normal paths,
+  // query for recently-registered subscribers who might be the one adding to cart
+  const recentSubscriberFallback =
+    normalizedCartToken && externalIdAliases.length > 0 && cartRows.length === 0 && aliasRows.length === 0
+      ? await sql`
+        SELECT DISTINCT s.external_id
+        FROM subscribers s
+        JOIN subscriber_tokens t ON t.subscriber_id = s.id
+        WHERE s.shop_domain = ${input.shopDomain}
+          AND t.shop_domain = ${input.shopDomain}
+          AND t.status = 'active'
+          AND s.last_seen_at >= NOW() - INTERVAL '24 hours'
+        ORDER BY s.last_seen_at DESC
+        LIMIT 50
+      `
+      : [];
+
   const candidates = Array.from(
     new Set(
       [
@@ -2568,6 +2585,7 @@ const resolveAutomationExternalIds = async (input: {
         ...aliasRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...cartRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...clientRows.map((row) => (row.external_id ? String(row.external_id) : null)),
+        ...recentSubscriberFallback.map((row) => (row.external_id ? String(row.external_id) : null)),
       ].filter((value): value is string => Boolean(value)),
     ),
   );
