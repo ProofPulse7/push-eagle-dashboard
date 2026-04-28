@@ -2560,10 +2560,10 @@ const resolveAutomationExternalIds = async (input: {
     `
     : [];
 
-  // Fallback: if we have a cartToken but found no candidates through normal paths,
-  // query for recently-registered subscribers who might be the one adding to cart
-  const recentSubscriberFallback =
-    normalizedCartToken && externalIdAliases.length > 0 && cartRows.length === 0 && aliasRows.length === 0
+  // Fallback: if we have a clientId, find subscribers who share that clientId via device context.
+  // This provides a reliable identity link when pixel events come before cart registration.
+  const clientIdSubscriberFallback =
+    normalizedClientId && externalIdAliases.length > 0 && aliasRows.length === 0
       ? await sql`
         SELECT DISTINCT s.external_id
         FROM subscribers s
@@ -2571,9 +2571,20 @@ const resolveAutomationExternalIds = async (input: {
         WHERE s.shop_domain = ${input.shopDomain}
           AND t.shop_domain = ${input.shopDomain}
           AND t.status = 'active'
+          AND (
+            s.device_context ->> 'clientId' = ${normalizedClientId}
+            OR s.device_context->>'clientId' = ${normalizedClientId}
+            OR EXISTS (
+              SELECT 1 FROM pixel_events
+              WHERE pixel_events.shop_domain = ${input.shopDomain}
+                AND COALESCE(pixel_events.client_id, '') = ${normalizedClientId}
+                AND COALESCE(pixel_events.external_id, '') = s.external_id
+                LIMIT 1
+            )
+          )
           AND s.last_seen_at >= NOW() - INTERVAL '24 hours'
         ORDER BY s.last_seen_at DESC
-        LIMIT 50
+        LIMIT 10
       `
       : [];
 
@@ -2585,7 +2596,7 @@ const resolveAutomationExternalIds = async (input: {
         ...aliasRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...cartRows.map((row) => (row.external_id ? String(row.external_id) : null)),
         ...clientRows.map((row) => (row.external_id ? String(row.external_id) : null)),
-        ...recentSubscriberFallback.map((row) => (row.external_id ? String(row.external_id) : null)),
+        ...clientIdSubscriberFallback.map((row) => (row.external_id ? String(row.external_id) : null)),
       ].filter((value): value is string => Boolean(value)),
     ),
   );
