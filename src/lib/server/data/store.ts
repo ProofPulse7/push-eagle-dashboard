@@ -3756,6 +3756,7 @@ export const processAutomationJob = async (jobId: string) => {
       const stepIndex = cartStepOrder.indexOf(payloadStepKey as CartStepKey);
       if (stepIndex > 0) {
         const previousStepKey = cartStepOrder[stepIndex - 1];
+        const hasIdentityForStepOrdering = Boolean(payloadExternalId || payloadCartToken || claim.subscriber_id);
         const previousStepDeliveryRows = payloadExternalId && payloadCartToken && claim.subscriber_id
           ? await sql`
             SELECT d.automation_job_id
@@ -3846,17 +3847,48 @@ export const processAutomationJob = async (jobId: string) => {
                       `
                       : [];
 
-        if (!previousStepDeliveryRows[0]?.automation_job_id) {
-          const waitMessage = `Waiting for previous cart reminder step (${previousStepKey}) before sending ${payloadStepKey}.`;
-          await sql`
-            UPDATE automation_jobs
-            SET status = 'pending',
-                error_message = ${waitMessage},
-                due_at = NOW() + INTERVAL '1 minute',
-                updated_at = NOW()
-            WHERE id = ${jobId}
+        if (!previousStepDeliveryRows[0]?.automation_job_id && hasIdentityForStepOrdering) {
+          const previousStepJobRows = await sql`
+            SELECT status
+            FROM automation_jobs
+            WHERE shop_domain = ${claim.shop_domain}
+              AND rule_key = 'cart_abandonment_30m'
+              AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+              AND (
+                (${payloadExternalId !== ''} AND payload ->> 'externalId' = ${payloadExternalId})
+                OR (${payloadCartToken !== ''} AND payload ->> 'cartToken' = ${payloadCartToken})
+                OR (${claim.subscriber_id != null} AND subscriber_id = ${claim.subscriber_id ?? 0})
+              )
+            ORDER BY created_at DESC
+            LIMIT 1
           `;
-          return { processed: false, error: waitMessage };
+
+          const previousStepStatus = previousStepJobRows[0]?.status == null
+            ? ''
+            : String(previousStepJobRows[0].status).toLowerCase();
+
+          if (previousStepStatus === 'pending' || previousStepStatus === 'processing' || previousStepStatus === 'sent') {
+            const waitMessage = `Waiting for previous cart reminder step (${previousStepKey}) before sending ${payloadStepKey}.`;
+            await sql`
+              UPDATE automation_jobs
+              SET status = 'pending',
+                  error_message = ${waitMessage},
+                  due_at = NOW() + INTERVAL '1 minute',
+                  updated_at = NOW()
+              WHERE id = ${jobId}
+            `;
+            return { processed: false, error: waitMessage };
+          }
+
+          if (previousStepStatus === 'skipped' || previousStepStatus === 'failed') {
+            const skipMessage = `Skipping ${payloadStepKey} because previous cart reminder step (${previousStepKey}) did not deliver.`;
+            await sql`
+              UPDATE automation_jobs
+              SET status = 'skipped', error_message = ${skipMessage}, updated_at = NOW()
+              WHERE id = ${jobId}
+            `;
+            return { processed: false, error: skipMessage };
+          }
         }
       }
 
