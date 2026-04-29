@@ -10,6 +10,7 @@ type ShopifyCartPayload = {
   id?: number | string;
   token?: string | null;
   updated_at?: string | null;
+  attributes?: Record<string, unknown> | Array<{ key?: string | null; name?: string | null; value?: string | null }> | null;
   line_items?: Array<{
     product_id?: number | string | null;
     variant_id?: number | string | null;
@@ -24,6 +25,23 @@ const deriveExternalId = (shopDomain: string, token?: string | null) => {
   }
 
   return `cart:${shopDomain}:${token}`;
+};
+
+const getCartAttribute = (payload: ShopifyCartPayload, key: string) => {
+  const attributes = payload.attributes;
+  if (!attributes) {
+    return null;
+  }
+
+  if (Array.isArray(attributes)) {
+    const row = attributes.find((item) => (item?.key ?? item?.name) === key);
+    const value = row?.value == null ? '' : String(row.value).trim();
+    return value || null;
+  }
+
+  const raw = (attributes as Record<string, unknown>)[key];
+  const value = raw == null ? '' : String(raw).trim();
+  return value || null;
 };
 
 export async function POST(request: Request) {
@@ -51,10 +69,13 @@ export async function POST(request: Request) {
       }
     }
 
-    const externalId = deriveExternalId(shopDomain, payload.token ?? null);
+    const attributeExternalId = getCartAttribute(payload, '_push_eagle_external_id');
+    const externalId = attributeExternalId || deriveExternalId(shopDomain, payload.token ?? null);
     if (!externalId) {
       return NextResponse.json({ ok: true, shopDomain, skipped: 'missing-token' });
     }
+
+    const clientId = getCartAttribute(payload, '_push_eagle_client_id');
 
     const firstLineItem = (payload.line_items ?? [])[0];
     await recordSubscriberActivity({
@@ -69,6 +90,7 @@ export async function POST(request: Request) {
         variantId: firstLineItem?.variant_id ? String(firstLineItem.variant_id) : null,
         quantity: firstLineItem?.quantity ?? null,
         updatedAt: payload.updated_at ?? null,
+        clientId,
       },
     });
 
