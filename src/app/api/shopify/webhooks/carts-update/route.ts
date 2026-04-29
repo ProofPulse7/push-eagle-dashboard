@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 
+import { getNeonSql } from '@/lib/integrations/database/neon';
 import { verifyShopifyWebhookSignature } from '@/lib/integrations/shopify/verify';
 import { recordSubscriberActivity, registerWebhookEvent } from '@/lib/server/data/store';
 import { parseShopDomain } from '@/lib/server/shop-context';
@@ -44,6 +45,70 @@ const getCartAttribute = (payload: ShopifyCartPayload, key: string) => {
   return value || null;
 };
 
+const resolveExternalIdFromCartSignals = async (shopDomain: string, token?: string | null) => {
+  const normalizedToken = token ? String(token).trim() : '';
+  if (!normalizedToken) {
+    return null;
+  }
+
+  const sql = getNeonSql();
+  const rows = await sql`
+    WITH cart_related AS (
+      SELECT
+        external_id,
+        created_at,
+        COALESCE(metadata ->> 'clientId', '') AS client_id
+      FROM subscriber_activity_events
+      WHERE shop_domain = ${shopDomain}
+        AND cart_token = ${normalizedToken}
+        AND created_at >= NOW() - INTERVAL '14 days'
+
+      UNION ALL
+
+      SELECT
+        external_id,
+        created_at,
+        COALESCE(client_id, '') AS client_id
+      FROM pixel_events
+      WHERE shop_domain = ${shopDomain}
+        AND cart_token = ${normalizedToken}
+        AND created_at >= NOW() - INTERVAL '14 days'
+    ),
+    stitched AS (
+      SELECT external_id, created_at
+      FROM cart_related
+
+      UNION ALL
+
+      SELECT e.external_id, e.created_at
+      FROM subscriber_activity_events e
+      WHERE e.shop_domain = ${shopDomain}
+        AND e.created_at >= NOW() - INTERVAL '14 days'
+        AND COALESCE(e.metadata ->> 'clientId', '') = ANY(
+          ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
+        )
+    )
+    SELECT external_id
+    FROM stitched
+    WHERE external_id IS NOT NULL
+      AND external_id <> ''
+    ORDER BY
+      CASE
+        WHEN external_id LIKE 'anon:%' THEN 0
+        WHEN external_id LIKE 'shopify_customer:%' THEN 1
+        WHEN external_id LIKE 'email:%' THEN 2
+        WHEN external_id LIKE 'cart:%' THEN 3
+        WHEN external_id LIKE 'px:%' THEN 4
+        ELSE 5
+      END,
+      created_at DESC
+    LIMIT 1
+  `;
+
+  const value = rows[0]?.external_id ? String(rows[0].external_id).trim() : '';
+  return value || null;
+};
+
 export async function POST(request: Request) {
   try {
     const rawBody = await request.text();
@@ -70,7 +135,10 @@ export async function POST(request: Request) {
     }
 
     const attributeExternalId = getCartAttribute(payload, '_push_eagle_external_id');
-    const externalId = attributeExternalId || deriveExternalId(shopDomain, payload.token ?? null);
+    const resolvedExternalId = attributeExternalId
+      || await resolveExternalIdFromCartSignals(shopDomain, payload.token ?? null)
+      || deriveExternalId(shopDomain, payload.token ?? null);
+    const externalId = resolvedExternalId;
     if (!externalId) {
       return NextResponse.json({ ok: true, shopDomain, skipped: 'missing-token' });
     }
