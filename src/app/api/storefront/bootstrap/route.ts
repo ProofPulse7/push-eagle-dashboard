@@ -77,7 +77,7 @@ export async function GET(request: Request) {
       shopDomain,
       externalId,
       tokenEndpoint: '/apps/push-eagle/token',
-      serviceWorkerPath: '/apps/push-eagle/sw.js',
+      serviceWorkerPath: '/apps/push-eagle/sw',
       conversionEndpoint: `${proxyBasePath}/conversion`,
       conversionFallbackEndpoint: `${directAppOrigin}/api/storefront/conversion`,
       activityEndpoint: `${proxyBasePath}/activity`,
