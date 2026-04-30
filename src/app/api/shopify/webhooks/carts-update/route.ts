@@ -45,10 +45,13 @@ const getCartAttribute = (payload: ShopifyCartPayload, key: string) => {
   return value || null;
 };
 
-const resolveExternalIdFromCartSignals = async (shopDomain: string, token?: string | null) => {
+const resolveIdentityFromCartSignals = async (shopDomain: string, token?: string | null) => {
   const normalizedToken = token ? String(token).trim() : '';
   if (!normalizedToken) {
-    return null;
+    return {
+      externalId: null as string | null,
+      clientId: null as string | null,
+    };
   }
 
   const sql = getNeonSql();
@@ -88,7 +91,7 @@ const resolveExternalIdFromCartSignals = async (shopDomain: string, token?: stri
           ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
         )
     )
-    SELECT external_id
+    SELECT external_id, client_id
     FROM stitched
     WHERE external_id IS NOT NULL
       AND external_id <> ''
@@ -105,8 +108,37 @@ const resolveExternalIdFromCartSignals = async (shopDomain: string, token?: stri
     LIMIT 1
   `;
 
-  const value = rows[0]?.external_id ? String(rows[0].external_id).trim() : '';
-  return value || null;
+  const externalId = rows[0]?.external_id ? String(rows[0].external_id).trim() : '';
+  const clientId = rows[0]?.client_id ? String(rows[0].client_id).trim() : '';
+
+  return {
+    externalId: externalId || null,
+    clientId: clientId || null,
+  };
+};
+
+const resolveSubscriberClientId = async (shopDomain: string, externalId?: string | null) => {
+  const normalizedExternalId = externalId ? String(externalId).trim() : '';
+  if (!normalizedExternalId) {
+    return null;
+  }
+
+  const sql = getNeonSql();
+  const rows = await sql`
+    SELECT s.device_context ->> 'clientId' AS client_id
+    FROM subscribers s
+    JOIN subscriber_tokens t ON t.subscriber_id = s.id
+    WHERE s.shop_domain = ${shopDomain}
+      AND t.shop_domain = ${shopDomain}
+      AND t.status = 'active'
+      AND s.external_id = ${normalizedExternalId}
+      AND COALESCE(s.device_context ->> 'clientId', '') <> ''
+    ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC
+    LIMIT 1
+  `;
+
+  const clientId = rows[0]?.client_id ? String(rows[0].client_id).trim() : '';
+  return clientId || null;
 };
 
 export async function POST(request: Request) {
@@ -134,16 +166,20 @@ export async function POST(request: Request) {
       }
     }
 
+    const cartSignalIdentity = await resolveIdentityFromCartSignals(shopDomain, payload.token ?? null);
+
     const attributeExternalId = getCartAttribute(payload, '_push_eagle_external_id');
     const resolvedExternalId = attributeExternalId
-      || await resolveExternalIdFromCartSignals(shopDomain, payload.token ?? null)
+      || cartSignalIdentity.externalId
       || deriveExternalId(shopDomain, payload.token ?? null);
     const externalId = resolvedExternalId;
     if (!externalId) {
       return NextResponse.json({ ok: true, shopDomain, skipped: 'missing-token' });
     }
 
-    const clientId = getCartAttribute(payload, '_push_eagle_client_id');
+    const clientId = getCartAttribute(payload, '_push_eagle_client_id')
+      || cartSignalIdentity.clientId
+      || await resolveSubscriberClientId(shopDomain, externalId);
 
     const firstLineItem = (payload.line_items ?? [])[0];
     await recordSubscriberActivity({
