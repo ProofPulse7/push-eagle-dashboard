@@ -351,7 +351,28 @@ export async function GET(request: NextRequest) {
                 AND COALESCE(r.client_id, '') <> ''
                 AND COALESCE(s.device_context ->> 'clientId', '') = COALESCE(r.client_id, '')
             )
-          ) AS external_ids_recoverable_by_client_id_2h
+          ) AS external_ids_recoverable_by_client_id_2h,
+          (SELECT COUNT(*)::INT FROM external_ids e
+            WHERE EXISTS (
+              SELECT 1
+              FROM subscriber_activity_events a
+              JOIN pixel_events p ON p.shop_domain = ${shopDomain}
+                AND COALESCE(p.cart_token, '') <> ''
+                AND p.cart_token = a.cart_token
+              JOIN subscribers s ON s.shop_domain = ${shopDomain}
+              JOIN subscriber_tokens t ON t.subscriber_id = s.id
+              WHERE a.shop_domain = ${shopDomain}
+                AND a.event_type = 'add_to_cart'
+                AND a.created_at >= NOW() - INTERVAL '2 hours'
+                AND a.external_id = e.external_id
+                AND t.shop_domain = ${shopDomain}
+                AND t.status = 'active'
+                AND (
+                  COALESCE(s.device_context ->> 'clientId', '') = COALESCE(p.client_id, '')
+                  OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = COALESCE(p.client_id, '')
+                )
+            )
+          ) AS external_ids_recoverable_by_cart_token_pixel_client_id_2h
       `,
     ]);
 
@@ -559,6 +580,7 @@ export async function GET(request: NextRequest) {
       addToCartIdentitySourceFallbackLast2Hours: Number(identityDebugRow?.add_to_cart_identity_source_fallback_2h ?? 0),
       directExternalIdsWithActiveTokenLast2Hours: Number(identityDebugRow?.direct_external_ids_with_active_token_2h ?? 0),
       externalIdsRecoverableByClientIdLast2Hours: Number(identityDebugRow?.external_ids_recoverable_by_client_id_2h ?? 0),
+      externalIdsRecoverableByCartTokenPixelClientIdLast2Hours: Number(identityDebugRow?.external_ids_recoverable_by_cart_token_pixel_client_id_2h ?? 0),
     };
 
     if (!cartRuleEnabled) {

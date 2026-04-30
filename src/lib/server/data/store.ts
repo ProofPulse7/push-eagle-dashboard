@@ -2565,6 +2565,20 @@ const resolveAutomationExternalIds = async (input: {
     `
     : [];
 
+  const cartRelatedClientIds = Array.from(
+    new Set(
+      cartRows
+        .map((row) => (row.client_id ? String(row.client_id).trim() : ''))
+        .filter((value) => value.length > 0),
+    ),
+  );
+
+  const fallbackClientIds = Array.from(
+    new Set(
+      [normalizedClientId, ...cartRelatedClientIds].filter((value): value is string => Boolean(value)),
+    ),
+  );
+
   const clientRows = normalizedClientId
     ? await sql`
       SELECT external_id, created_at
@@ -2606,7 +2620,7 @@ const resolveAutomationExternalIds = async (input: {
   // Fallback: if we have a clientId, find subscribers who share that clientId via device context.
   // This provides a reliable identity link when pixel events come before cart registration.
   const clientIdSubscriberFallback =
-    normalizedClientId && aliasRows.length === 0
+    fallbackClientIds.length > 0 && aliasRows.length === 0
       ? await sql`
         SELECT DISTINCT s.external_id
         FROM subscribers s
@@ -2615,13 +2629,12 @@ const resolveAutomationExternalIds = async (input: {
           AND t.shop_domain = ${input.shopDomain}
           AND t.status = 'active'
           AND (
-            s.device_context ->> 'clientId' = ${normalizedClientId}
-            OR s.device_context->>'clientId' = ${normalizedClientId}
-            OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ${normalizedClientId}
+            COALESCE(s.device_context ->> 'clientId', '') = ANY(${fallbackClientIds})
+            OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ANY(${fallbackClientIds})
             OR EXISTS (
               SELECT 1 FROM pixel_events
               WHERE pixel_events.shop_domain = ${input.shopDomain}
-                AND COALESCE(pixel_events.client_id, '') = ${normalizedClientId}
+                AND COALESCE(pixel_events.client_id, '') = ANY(${fallbackClientIds})
                 AND COALESCE(pixel_events.external_id, '') = s.external_id
                 LIMIT 1
             )
