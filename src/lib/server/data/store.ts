@@ -2376,6 +2376,42 @@ const listAutomationTargetsByExternalIds = async (shopDomain: string, externalId
   }));
 };
 
+const listAutomationTargetsByClientId = async (shopDomain: string, clientId: string) => {
+  const normalizedClientId = String(clientId || '').trim();
+  if (!normalizedClientId) {
+    return [] as Array<{ tokenId: number; subscriberId: number | null; externalId: string | null }>;
+  }
+
+  const sql = getNeonSql();
+  const rows = await sql`
+    WITH ranked AS (
+      SELECT
+        t.id AS token_id,
+        s.id AS subscriber_id,
+        s.external_id,
+        ROW_NUMBER() OVER (
+          PARTITION BY s.id
+          ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC, t.id DESC
+        ) AS rn
+      FROM subscriber_tokens t
+      JOIN subscribers s ON s.id = t.subscriber_id
+      WHERE t.shop_domain = ${shopDomain}
+        AND s.shop_domain = ${shopDomain}
+        AND t.status = 'active'
+        AND COALESCE(s.device_context ->> 'clientId', '') = ${normalizedClientId}
+    )
+    SELECT token_id, subscriber_id, external_id
+    FROM ranked
+    WHERE rn = 1
+  `;
+
+  return rows.map((row) => ({
+    tokenId: Number(row.token_id),
+    subscriberId: row.subscriber_id ? Number(row.subscriber_id) : null,
+    externalId: row.external_id ? String(row.external_id) : null,
+  }));
+};
+
 const normalizeClientId = (metadata?: Record<string, unknown> | null) => {
   const raw = metadata && typeof metadata.clientId === 'string' ? metadata.clientId : '';
   const value = raw.trim();
@@ -4425,6 +4461,10 @@ export const recordSubscriberActivity = async (input: {
         if (externalIdCandidates.length > 0) {
           targets = await listAutomationTargetsByExternalIds(input.shopDomain, externalIdCandidates);
         }
+      }
+
+      if (targets.length === 0 && clientId) {
+        targets = await listAutomationTargetsByClientId(input.shopDomain, clientId);
       }
 
       for (const stepKey of Object.keys(cartConfig.steps) as CartStepKey[]) {
