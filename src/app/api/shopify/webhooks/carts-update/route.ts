@@ -181,13 +181,20 @@ export async function POST(request: Request) {
     const cartSignalIdentity = await resolveIdentityFromCartSignals(shopDomain, payload.token ?? null);
 
     const attributeExternalId = getCartAttribute(payload, '_push_eagle_external_id');
+    const fallbackExternalId = deriveExternalId(shopDomain, payload.token ?? null);
     const resolvedExternalId = attributeExternalId
       || cartSignalIdentity.externalId
-      || deriveExternalId(shopDomain, payload.token ?? null);
+      || fallbackExternalId;
     const externalId = resolvedExternalId;
     if (!externalId) {
       return NextResponse.json({ ok: true, shopDomain, skipped: 'missing-token' });
     }
+
+    const identitySource = attributeExternalId
+      ? 'attribute'
+      : cartSignalIdentity.externalId
+        ? 'signal'
+        : 'fallback_cart_token';
 
     const clientId = getCartAttribute(payload, '_push_eagle_client_id')
       || cartSignalIdentity.clientId
@@ -207,6 +214,7 @@ export async function POST(request: Request) {
         quantity: firstLineItem?.quantity ?? null,
         updatedAt: payload.updated_at ?? null,
         clientId,
+        cartIdentitySource: identitySource,
       },
     });
 
