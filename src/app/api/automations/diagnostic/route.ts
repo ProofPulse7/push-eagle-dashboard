@@ -383,7 +383,27 @@ export async function GET(request: NextRequest) {
                   OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = COALESCE(p.client_id, '')
                 )
             )
-          ) AS external_ids_recoverable_by_cart_token_pixel_client_id_2h
+          ) AS external_ids_recoverable_by_cart_token_pixel_client_id_2h,
+          (SELECT created_at FROM subscriber_activity_events
+            WHERE shop_domain = ${shopDomain}
+              AND event_type = 'add_to_cart'
+            ORDER BY created_at DESC
+            LIMIT 1
+          ) AS latest_add_to_cart_at,
+          (SELECT COALESCE(metadata ->> 'clientId', metadata ->> 'shopifyAnalyticsClientId', '')
+            FROM subscriber_activity_events
+            WHERE shop_domain = ${shopDomain}
+              AND event_type = 'add_to_cart'
+            ORDER BY created_at DESC
+            LIMIT 1
+          ) AS latest_add_to_cart_client_id,
+          (SELECT COALESCE(metadata ->> 'cartIdentitySource', '')
+            FROM subscriber_activity_events
+            WHERE shop_domain = ${shopDomain}
+              AND event_type = 'add_to_cart'
+            ORDER BY created_at DESC
+            LIMIT 1
+          ) AS latest_add_to_cart_identity_source
       `,
     ]);
 
@@ -594,6 +614,9 @@ export async function GET(request: NextRequest) {
       directExternalIdsWithActiveTokenLast2Hours: Number(identityDebugRow?.direct_external_ids_with_active_token_2h ?? 0),
       externalIdsRecoverableByClientIdLast2Hours: Number(identityDebugRow?.external_ids_recoverable_by_client_id_2h ?? 0),
       externalIdsRecoverableByCartTokenPixelClientIdLast2Hours: Number(identityDebugRow?.external_ids_recoverable_by_cart_token_pixel_client_id_2h ?? 0),
+      latestAddToCartAt: toIsoOrNull(identityDebugRow?.latest_add_to_cart_at),
+      latestAddToCartHasClientId: Boolean(String(identityDebugRow?.latest_add_to_cart_client_id ?? '').trim()),
+      latestAddToCartIdentitySource: String(identityDebugRow?.latest_add_to_cart_identity_source ?? '') || null,
     };
 
     if (!cartRuleEnabled) {
@@ -625,6 +648,10 @@ export async function GET(request: NextRequest) {
 
     if (coreSignals.addToCartEventsLast2Hours > 0 && coreProblemFinder.addToCartEventsWithClientIdLast2Hours === 0) {
       inferredIssues.push('Core problem finder: add_to_cart events are missing clientId metadata, reducing identity stitching accuracy.');
+    }
+
+    if (coreProblemFinder.latestAddToCartAt && !coreProblemFinder.latestAddToCartHasClientId) {
+      inferredIssues.push('Core problem finder: latest add_to_cart event still has no client identity metadata; post-fix storefront event path has not been observed yet.');
     }
 
     if (coreSignals.addToCartEventsLast2Hours > 0 && coreProblemFinder.pixelAddToCartEventsLast2Hours === 0) {
