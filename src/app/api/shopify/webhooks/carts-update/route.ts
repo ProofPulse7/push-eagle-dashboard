@@ -12,6 +12,7 @@ type ShopifyCartPayload = {
   token?: string | null;
   updated_at?: string | null;
   attributes?: Record<string, unknown> | Array<{ key?: string | null; name?: string | null; value?: string | null }> | null;
+  note_attributes?: Record<string, unknown> | Array<{ key?: string | null; name?: string | null; value?: string | null }> | null;
   line_items?: Array<{
     product_id?: number | string | null;
     variant_id?: number | string | null;
@@ -29,20 +30,31 @@ const deriveExternalId = (shopDomain: string, token?: string | null) => {
 };
 
 const getCartAttribute = (payload: ShopifyCartPayload, key: string) => {
-  const attributes = payload.attributes;
-  if (!attributes) {
-    return null;
+  const pools = [payload.attributes, payload.note_attributes];
+
+  for (let idx = 0; idx < pools.length; idx += 1) {
+    const attributes = pools[idx];
+    if (!attributes) {
+      continue;
+    }
+
+    if (Array.isArray(attributes)) {
+      const row = attributes.find((item) => (item?.key ?? item?.name) === key);
+      const value = row?.value == null ? '' : String(row.value).trim();
+      if (value) {
+        return value;
+      }
+      continue;
+    }
+
+    const raw = (attributes as Record<string, unknown>)[key];
+    const value = raw == null ? '' : String(raw).trim();
+    if (value) {
+      return value;
+    }
   }
 
-  if (Array.isArray(attributes)) {
-    const row = attributes.find((item) => (item?.key ?? item?.name) === key);
-    const value = row?.value == null ? '' : String(row.value).trim();
-    return value || null;
-  }
-
-  const raw = (attributes as Record<string, unknown>)[key];
-  const value = raw == null ? '' : String(raw).trim();
-  return value || null;
+  return null;
 };
 
 const resolveIdentityFromCartSignals = async (shopDomain: string, token?: string | null) => {
