@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { env } from '@/lib/config/env';
 import { verifyShopifyAppProxySignature } from '@/lib/integrations/shopify/verify';
 import { getRequestGeo } from '@/lib/server/request-geo';
-import { upsertSubscriberToken } from '@/lib/server/data/store';
+import { recordSubscriberIdentityLink, upsertSubscriberToken } from '@/lib/server/data/store';
 import { parseShopDomain } from '@/lib/server/shop-context';
 
 export const runtime = 'nodejs';
@@ -105,6 +105,26 @@ const detectPlatformFromUserAgent = (userAgent: string | null) => {
   return 'unknown';
 };
 
+const parseCartTokenFromCookieHeader = (cookieHeader: string | null) => {
+  const source = String(cookieHeader || '');
+  if (!source) {
+    return null;
+  }
+
+  const match = source.match(/(?:^|;\s*)cart=([^;]+)/i);
+  if (!match || !match[1]) {
+    return null;
+  }
+
+  try {
+    const decoded = decodeURIComponent(match[1]);
+    const token = String(decoded || '').split('?')[0]?.trim() || '';
+    return token || null;
+  } catch (_error) {
+    return null;
+  }
+};
+
 export async function OPTIONS(request: Request) {
   const origin = request.headers.get('origin');
   return new NextResponse(null, { status: 204, headers: buildCorsHeaders(getCorsOrigin(origin)) });
@@ -173,6 +193,19 @@ export async function POST(request: Request) {
       userAgent,
       deviceContext: enrichedDeviceContext,
     });
+
+    const cartToken = parseCartTokenFromCookieHeader(request.headers.get('cookie'));
+    if (cartToken) {
+      await recordSubscriberIdentityLink({
+        shopDomain,
+        externalId,
+        cartToken,
+        metadata: {
+          source: 'token_registration_cart_cookie',
+          clientId,
+        },
+      });
+    }
 
     return NextResponse.json(
       {

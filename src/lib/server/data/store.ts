@@ -4340,6 +4340,38 @@ export const processAutomationJob = async (jobId: string) => {
   }
 };
 
+export const recordSubscriberIdentityLink = async (input: {
+  shopDomain: string;
+  externalId: string;
+  cartToken?: string | null;
+  metadata?: Record<string, unknown> | null;
+}) => {
+  await ensureSchema();
+
+  const normalizedCartToken = input.cartToken ? String(input.cartToken).trim() : '';
+  if (!normalizedCartToken) {
+    return { linked: false };
+  }
+
+  const sql = getNeonSql();
+  const eventId = randomUUID();
+  await sql`
+    INSERT INTO subscriber_activity_events (id, shop_domain, external_id, event_type, page_url, product_id, cart_token, metadata)
+    VALUES (
+      ${eventId},
+      ${input.shopDomain},
+      ${input.externalId},
+      ${'identity_link'},
+      ${null},
+      ${null},
+      ${normalizedCartToken},
+      ${JSON.stringify(input.metadata ?? {})}::jsonb
+    )
+  `;
+
+  return { linked: true };
+};
+
 export const recordSubscriberActivity = async (input: {
   shopDomain: string;
   externalId: string;
