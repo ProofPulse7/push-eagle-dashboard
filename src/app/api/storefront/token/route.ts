@@ -20,6 +20,7 @@ const schema = z.object({
   vapidAuth: z.string().optional().nullable(),
   externalId: z.string().optional().nullable(),
   clientId: z.string().optional().nullable(),
+  cartToken: z.string().optional().nullable(),
   browser: z.string().optional().nullable(),
   platform: z.string().optional().nullable(),
   locale: z.string().optional().nullable(),
@@ -194,7 +195,9 @@ export async function POST(request: Request) {
       deviceContext: enrichedDeviceContext,
     });
 
-    const cartToken = parseCartTokenFromCookieHeader(request.headers.get('cookie'));
+    const cartToken = body.cartToken?.trim()
+      ? body.cartToken.trim()
+      : parseCartTokenFromCookieHeader(request.headers.get('cookie'));
     if (cartToken) {
       await recordSubscriberIdentityLink({
         shopDomain,
