@@ -296,7 +296,7 @@ export async function GET(request: NextRequest) {
           SELECT
             external_id,
             COALESCE(cart_token, '') AS cart_token,
-            COALESCE(metadata ->> 'clientId', '') AS client_id
+            COALESCE(metadata ->> 'clientId', metadata ->> 'shopifyAnalyticsClientId', '') AS client_id
           FROM subscriber_activity_events
           WHERE shop_domain = ${shopDomain}
             AND event_type = 'add_to_cart'

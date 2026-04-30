@@ -2398,7 +2398,10 @@ const listAutomationTargetsByClientId = async (shopDomain: string, clientId: str
       WHERE t.shop_domain = ${shopDomain}
         AND s.shop_domain = ${shopDomain}
         AND t.status = 'active'
-        AND COALESCE(s.device_context ->> 'clientId', '') = ${normalizedClientId}
+        AND (
+          COALESCE(s.device_context ->> 'clientId', '') = ${normalizedClientId}
+          OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ${normalizedClientId}
+        )
     )
     SELECT token_id, subscriber_id, external_id
     FROM ranked
@@ -2413,7 +2416,11 @@ const listAutomationTargetsByClientId = async (shopDomain: string, clientId: str
 };
 
 const normalizeClientId = (metadata?: Record<string, unknown> | null) => {
-  const raw = metadata && typeof metadata.clientId === 'string' ? metadata.clientId : '';
+  const raw = metadata && typeof metadata.clientId === 'string'
+    ? metadata.clientId
+    : metadata && typeof metadata.shopifyAnalyticsClientId === 'string'
+      ? metadata.shopifyAnalyticsClientId
+      : '';
   const value = raw.trim();
   return value.length > 0 ? value : null;
 };
@@ -2508,7 +2515,7 @@ const resolveAutomationExternalIds = async (input: {
         SELECT
           external_id,
           created_at,
-          COALESCE(metadata ->> 'clientId', '') AS client_id
+          COALESCE(metadata ->> 'clientId', metadata ->> 'shopifyAnalyticsClientId', '') AS client_id
         FROM subscriber_activity_events
         WHERE shop_domain = ${input.shopDomain}
           AND cart_token = ${normalizedCartToken}
@@ -2535,7 +2542,7 @@ const resolveAutomationExternalIds = async (input: {
         FROM subscriber_activity_events e
         WHERE e.shop_domain = ${input.shopDomain}
           AND e.created_at >= ${windowStart}
-          AND COALESCE(e.metadata ->> 'clientId', '') = ANY(
+          AND COALESCE(e.metadata ->> 'clientId', e.metadata ->> 'shopifyAnalyticsClientId', '') = ANY(
             ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
           )
 
@@ -2565,7 +2572,7 @@ const resolveAutomationExternalIds = async (input: {
         SELECT external_id, created_at
         FROM subscriber_activity_events
         WHERE shop_domain = ${input.shopDomain}
-          AND COALESCE(metadata ->> 'clientId', '') = ${normalizedClientId}
+          AND COALESCE(metadata ->> 'clientId', metadata ->> 'shopifyAnalyticsClientId', '') = ${normalizedClientId}
           AND created_at >= ${windowStart}
 
         UNION ALL
@@ -2610,6 +2617,7 @@ const resolveAutomationExternalIds = async (input: {
           AND (
             s.device_context ->> 'clientId' = ${normalizedClientId}
             OR s.device_context->>'clientId' = ${normalizedClientId}
+            OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ${normalizedClientId}
             OR EXISTS (
               SELECT 1 FROM pixel_events
               WHERE pixel_events.shop_domain = ${input.shopDomain}
@@ -4338,38 +4346,6 @@ export const processAutomationJob = async (jobId: string) => {
 
     return { processed: false, error: message };
   }
-};
-
-export const recordSubscriberIdentityLink = async (input: {
-  shopDomain: string;
-  externalId: string;
-  cartToken?: string | null;
-  metadata?: Record<string, unknown> | null;
-}) => {
-  await ensureSchema();
-
-  const normalizedCartToken = input.cartToken ? String(input.cartToken).trim() : '';
-  if (!normalizedCartToken) {
-    return { linked: false };
-  }
-
-  const sql = getNeonSql();
-  const eventId = randomUUID();
-  await sql`
-    INSERT INTO subscriber_activity_events (id, shop_domain, external_id, event_type, page_url, product_id, cart_token, metadata)
-    VALUES (
-      ${eventId},
-      ${input.shopDomain},
-      ${input.externalId},
-      ${'identity_link'},
-      ${null},
-      ${null},
-      ${normalizedCartToken},
-      ${JSON.stringify(input.metadata ?? {})}::jsonb
-    )
-  `;
-
-  return { linked: true };
 };
 
 export const recordSubscriberActivity = async (input: {
