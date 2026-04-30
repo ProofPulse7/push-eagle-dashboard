@@ -328,6 +328,17 @@ export async function GET(request: NextRequest) {
               AND created_at >= NOW() - INTERVAL '2 hours'
               AND COALESCE(metadata ->> 'cartIdentitySource', '') = 'fallback_cart_token'
           ) AS add_to_cart_identity_source_fallback_2h,
+          (SELECT COUNT(*)::INT FROM pixel_events
+            WHERE shop_domain = ${shopDomain}
+              AND event_type = 'add_to_cart'
+              AND created_at >= NOW() - INTERVAL '2 hours'
+          ) AS pixel_add_to_cart_events_2h,
+          (SELECT COUNT(*)::INT FROM pixel_events
+            WHERE shop_domain = ${shopDomain}
+              AND event_type = 'add_to_cart'
+              AND created_at >= NOW() - INTERVAL '2 hours'
+              AND COALESCE(client_id, '') <> ''
+          ) AS pixel_add_to_cart_with_client_id_2h,
           (SELECT COUNT(*)::INT FROM external_ids e
             WHERE EXISTS (
               SELECT 1
@@ -578,6 +589,8 @@ export async function GET(request: NextRequest) {
       addToCartIdentitySourceAttributeLast2Hours: Number(identityDebugRow?.add_to_cart_identity_source_attribute_2h ?? 0),
       addToCartIdentitySourceSignalLast2Hours: Number(identityDebugRow?.add_to_cart_identity_source_signal_2h ?? 0),
       addToCartIdentitySourceFallbackLast2Hours: Number(identityDebugRow?.add_to_cart_identity_source_fallback_2h ?? 0),
+      pixelAddToCartEventsLast2Hours: Number(identityDebugRow?.pixel_add_to_cart_events_2h ?? 0),
+      pixelAddToCartWithClientIdLast2Hours: Number(identityDebugRow?.pixel_add_to_cart_with_client_id_2h ?? 0),
       directExternalIdsWithActiveTokenLast2Hours: Number(identityDebugRow?.direct_external_ids_with_active_token_2h ?? 0),
       externalIdsRecoverableByClientIdLast2Hours: Number(identityDebugRow?.external_ids_recoverable_by_client_id_2h ?? 0),
       externalIdsRecoverableByCartTokenPixelClientIdLast2Hours: Number(identityDebugRow?.external_ids_recoverable_by_cart_token_pixel_client_id_2h ?? 0),
@@ -612,6 +625,17 @@ export async function GET(request: NextRequest) {
 
     if (coreSignals.addToCartEventsLast2Hours > 0 && coreProblemFinder.addToCartEventsWithClientIdLast2Hours === 0) {
       inferredIssues.push('Core problem finder: add_to_cart events are missing clientId metadata, reducing identity stitching accuracy.');
+    }
+
+    if (coreSignals.addToCartEventsLast2Hours > 0 && coreProblemFinder.pixelAddToCartEventsLast2Hours === 0) {
+      inferredIssues.push('Core problem finder: no add_to_cart pixel events were ingested in the last 2 hours; storefront web pixel tracking is not feeding cart identity.');
+    }
+
+    if (
+      coreProblemFinder.pixelAddToCartEventsLast2Hours > 0
+      && coreProblemFinder.pixelAddToCartWithClientIdLast2Hours === 0
+    ) {
+      inferredIssues.push('Core problem finder: add_to_cart pixel events are present but missing client_id; pixel identity bridge is incomplete.');
     }
 
     if (coreSignals.addToCartEventsLast2Hours > 0 && coreProblemFinder.addToCartEventsWithCartTokenLast2Hours === 0) {
