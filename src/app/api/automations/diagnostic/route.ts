@@ -139,6 +139,7 @@ export async function GET(request: NextRequest) {
       activityRows,
       cartWindowRows,
       tokenCoverageRows,
+      identityDebugRows,
     ] = await Promise.all([
       sql`
         SELECT
@@ -289,6 +290,50 @@ export async function GET(request: NextRequest) {
         SELECT
           (SELECT COUNT(*)::INT FROM cart_external_ids) AS cart_external_ids,
           (SELECT COUNT(*)::INT FROM matched_external_ids) AS matched_external_ids
+      `,
+      sql`
+        WITH recent_add_to_cart AS (
+          SELECT
+            external_id,
+            COALESCE(cart_token, '') AS cart_token,
+            COALESCE(metadata ->> 'clientId', '') AS client_id
+          FROM subscriber_activity_events
+          WHERE shop_domain = ${shopDomain}
+            AND event_type = 'add_to_cart'
+            AND created_at >= NOW() - INTERVAL '2 hours'
+            AND external_id IS NOT NULL
+            AND external_id <> ''
+        ),
+        external_ids AS (
+          SELECT DISTINCT external_id FROM recent_add_to_cart
+        )
+        SELECT
+          (SELECT COUNT(*)::INT FROM recent_add_to_cart WHERE cart_token <> '') AS add_to_cart_with_cart_token_2h,
+          (SELECT COUNT(*)::INT FROM recent_add_to_cart WHERE client_id <> '') AS add_to_cart_with_client_id_2h,
+          (SELECT COUNT(*)::INT FROM external_ids e
+            WHERE EXISTS (
+              SELECT 1
+              FROM subscribers s
+              JOIN subscriber_tokens t ON t.subscriber_id = s.id
+              WHERE s.shop_domain = ${shopDomain}
+                AND t.shop_domain = ${shopDomain}
+                AND t.status = 'active'
+                AND s.external_id = e.external_id
+            )
+          ) AS direct_external_ids_with_active_token_2h,
+          (SELECT COUNT(*)::INT FROM external_ids e
+            WHERE EXISTS (
+              SELECT 1
+              FROM recent_add_to_cart r
+              JOIN subscribers s ON s.shop_domain = ${shopDomain}
+              JOIN subscriber_tokens t ON t.subscriber_id = s.id
+              WHERE r.external_id = e.external_id
+                AND t.shop_domain = ${shopDomain}
+                AND t.status = 'active'
+                AND COALESCE(r.client_id, '') <> ''
+                AND COALESCE(s.device_context ->> 'clientId', '') = COALESCE(r.client_id, '')
+            )
+          ) AS external_ids_recoverable_by_client_id_2h
       `,
     ]);
 
@@ -470,6 +515,7 @@ export async function GET(request: NextRequest) {
     const activityRow = activityRows[0] as Record<string, unknown> | undefined;
     const cartWindowRow = cartWindowRows[0] as Record<string, unknown> | undefined;
     const tokenCoverageRow = tokenCoverageRows[0] as Record<string, unknown> | undefined;
+    const identityDebugRow = identityDebugRows[0] as Record<string, unknown> | undefined;
 
     const coreSignals: DiagnosticResult['abandonedCartDiagnostics']['coreSignals'] = {
       addToCartEventsLast2Hours: Number(activityRow?.add_to_cart_events_2h ?? 0),
@@ -486,6 +532,13 @@ export async function GET(request: NextRequest) {
     };
 
     const inferredIssues: string[] = [];
+
+    const coreProblemFinder = {
+      addToCartEventsWithCartTokenLast2Hours: Number(identityDebugRow?.add_to_cart_with_cart_token_2h ?? 0),
+      addToCartEventsWithClientIdLast2Hours: Number(identityDebugRow?.add_to_cart_with_client_id_2h ?? 0),
+      directExternalIdsWithActiveTokenLast2Hours: Number(identityDebugRow?.direct_external_ids_with_active_token_2h ?? 0),
+      externalIdsRecoverableByClientIdLast2Hours: Number(identityDebugRow?.external_ids_recoverable_by_client_id_2h ?? 0),
+    };
 
     if (!cartRuleEnabled) {
       inferredIssues.push('Abandoned-cart rule is disabled, so add_to_cart events will not create reminders.');
@@ -512,6 +565,22 @@ export async function GET(request: NextRequest) {
       && coreSignals.addToCartExternalIdsWithoutDirectActiveTokenMatch > 0
     ) {
       inferredIssues.push('Some add_to_cart identities have no direct active token match; identity stitching is required for these shoppers.');
+    }
+
+    if (coreSignals.addToCartEventsLast2Hours > 0 && coreProblemFinder.addToCartEventsWithClientIdLast2Hours === 0) {
+      inferredIssues.push('Core problem finder: add_to_cart events are missing clientId metadata, reducing identity stitching accuracy.');
+    }
+
+    if (coreSignals.addToCartEventsLast2Hours > 0 && coreProblemFinder.addToCartEventsWithCartTokenLast2Hours === 0) {
+      inferredIssues.push('Core problem finder: add_to_cart events are missing cart_token, reducing cart-linked identity stitching.');
+    }
+
+    if (
+      coreSignals.addToCartExternalIdsLast2Hours > 0
+      && coreProblemFinder.directExternalIdsWithActiveTokenLast2Hours === 0
+      && coreProblemFinder.externalIdsRecoverableByClientIdLast2Hours > 0
+    ) {
+      inferredIssues.push('Core problem finder: direct externalId matching is failing, but clientId linkage suggests subscribers are recoverable via stitched identity.');
     }
 
     if (coreSignals.cartJobsMissingStepKeyLast2Hours > 0) {
@@ -613,7 +682,10 @@ export async function GET(request: NextRequest) {
         component: 'AbandonedCartEnqueue',
         title: 'Add-to-cart events are not turning into cart reminder jobs',
         description: 'Core enqueue path issue: activity exists but abandoned-cart jobs were not created.',
-        details: coreSignals,
+        details: {
+          ...coreSignals,
+          coreProblemFinder,
+        },
       });
     }
 

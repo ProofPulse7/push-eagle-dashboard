@@ -2563,7 +2563,7 @@ const resolveAutomationExternalIds = async (input: {
   // Fallback: if we have a clientId, find subscribers who share that clientId via device context.
   // This provides a reliable identity link when pixel events come before cart registration.
   const clientIdSubscriberFallback =
-    normalizedClientId && externalIdAliases.length > 0 && aliasRows.length === 0
+    normalizedClientId && aliasRows.length === 0
       ? await sql`
         SELECT DISTINCT s.external_id
         FROM subscribers s
@@ -2582,9 +2582,8 @@ const resolveAutomationExternalIds = async (input: {
                 LIMIT 1
             )
           )
-          AND s.last_seen_at >= NOW() - INTERVAL '24 hours'
-        ORDER BY s.last_seen_at DESC
-        LIMIT 10
+        ORDER BY t.last_seen_at DESC NULLS LAST, s.last_seen_at DESC NULLS LAST
+        LIMIT 50
       `
       : [];
 
