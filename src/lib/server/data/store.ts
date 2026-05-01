@@ -3524,7 +3524,7 @@ export const processAutomationJob = async (jobId: string) => {
       UPDATE automation_jobs
       SET status = ${shouldFail ? 'failed' : 'pending'},
           error_message = ${errorMessage},
-          due_at = CASE WHEN ${shouldFail} THEN due_at ELSE NOW() + INTERVAL '1 minute' END,
+          due_at = CASE WHEN (${shouldFail}::boolean) THEN due_at ELSE NOW() + INTERVAL '1 minute' END,
           updated_at = NOW()
       WHERE id = ${jobId}
     `;
