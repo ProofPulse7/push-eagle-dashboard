@@ -3520,14 +3520,24 @@ export const processAutomationJob = async (jobId: string) => {
       ? 'Missing active token.'
       : 'Missing active token. Waiting for token refresh.';
 
-    await sql`
-      UPDATE automation_jobs
-      SET status = ${shouldFail ? 'failed' : 'pending'},
-          error_message = ${errorMessage},
-          due_at = CASE WHEN (${shouldFail}::boolean) THEN due_at ELSE NOW() + INTERVAL '1 minute' END,
-          updated_at = NOW()
-      WHERE id = ${jobId}
-    `;
+    if (shouldFail) {
+      await sql`
+        UPDATE automation_jobs
+        SET status = 'failed',
+            error_message = ${errorMessage},
+            updated_at = NOW()
+        WHERE id = ${jobId}
+      `;
+    } else {
+      await sql`
+        UPDATE automation_jobs
+        SET status = 'pending',
+            error_message = ${errorMessage},
+            due_at = NOW() + INTERVAL '1 minute',
+            updated_at = NOW()
+        WHERE id = ${jobId}
+      `;
+    }
     return { processed: false, error: errorMessage };
   }
 
@@ -3973,20 +3983,97 @@ export const processAutomationJob = async (jobId: string) => {
                       : [];
 
         if (!previousStepDeliveryRows[0]?.automation_job_id && hasIdentityForStepOrdering) {
-          const previousStepJobRows = await sql`
-            SELECT status, attempts, error_message
-            FROM automation_jobs
-            WHERE shop_domain = ${claim.shop_domain}
-              AND rule_key = 'cart_abandonment_30m'
-              AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
-              AND (
-                (${payloadExternalId !== ''}::boolean AND payload ->> 'externalId' = ${payloadExternalId})
-                OR (${payloadCartToken !== ''}::boolean AND payload ->> 'cartToken' = ${payloadCartToken})
-                OR (${claim.subscriber_id != null}::boolean AND subscriber_id = ${claim.subscriber_id ?? 0})
-              )
-            ORDER BY created_at DESC
-            LIMIT 1
-          `;
+          const previousStepJobRows = payloadExternalId && payloadCartToken && claim.subscriber_id
+            ? await sql`
+              SELECT status, attempts, error_message
+              FROM automation_jobs
+              WHERE shop_domain = ${claim.shop_domain}
+                AND rule_key = 'cart_abandonment_30m'
+                AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                AND (
+                  payload ->> 'externalId' = ${payloadExternalId}
+                  OR payload ->> 'cartToken' = ${payloadCartToken}
+                  OR subscriber_id = ${claim.subscriber_id}
+                )
+              ORDER BY created_at DESC
+              LIMIT 1
+            `
+            : payloadExternalId && payloadCartToken
+              ? await sql`
+                SELECT status, attempts, error_message
+                FROM automation_jobs
+                WHERE shop_domain = ${claim.shop_domain}
+                  AND rule_key = 'cart_abandonment_30m'
+                  AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                  AND (
+                    payload ->> 'externalId' = ${payloadExternalId}
+                    OR payload ->> 'cartToken' = ${payloadCartToken}
+                  )
+                ORDER BY created_at DESC
+                LIMIT 1
+              `
+              : payloadExternalId && claim.subscriber_id
+                ? await sql`
+                  SELECT status, attempts, error_message
+                  FROM automation_jobs
+                  WHERE shop_domain = ${claim.shop_domain}
+                    AND rule_key = 'cart_abandonment_30m'
+                    AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                    AND (
+                      payload ->> 'externalId' = ${payloadExternalId}
+                      OR subscriber_id = ${claim.subscriber_id}
+                    )
+                  ORDER BY created_at DESC
+                  LIMIT 1
+                `
+                : payloadCartToken && claim.subscriber_id
+                  ? await sql`
+                    SELECT status, attempts, error_message
+                    FROM automation_jobs
+                    WHERE shop_domain = ${claim.shop_domain}
+                      AND rule_key = 'cart_abandonment_30m'
+                      AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                      AND (
+                        payload ->> 'cartToken' = ${payloadCartToken}
+                        OR subscriber_id = ${claim.subscriber_id}
+                      )
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                  `
+                  : payloadExternalId
+                    ? await sql`
+                      SELECT status, attempts, error_message
+                      FROM automation_jobs
+                      WHERE shop_domain = ${claim.shop_domain}
+                        AND rule_key = 'cart_abandonment_30m'
+                        AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                        AND payload ->> 'externalId' = ${payloadExternalId}
+                      ORDER BY created_at DESC
+                      LIMIT 1
+                    `
+                    : payloadCartToken
+                      ? await sql`
+                        SELECT status, attempts, error_message
+                        FROM automation_jobs
+                        WHERE shop_domain = ${claim.shop_domain}
+                          AND rule_key = 'cart_abandonment_30m'
+                          AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                          AND payload ->> 'cartToken' = ${payloadCartToken}
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                      `
+                      : claim.subscriber_id
+                        ? await sql`
+                          SELECT status, attempts, error_message
+                          FROM automation_jobs
+                          WHERE shop_domain = ${claim.shop_domain}
+                            AND rule_key = 'cart_abandonment_30m'
+                            AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
+                            AND subscriber_id = ${claim.subscriber_id}
+                          ORDER BY created_at DESC
+                          LIMIT 1
+                        `
+                        : [];
 
           const previousStepStatus = previousStepJobRows[0]?.status == null
             ? ''
