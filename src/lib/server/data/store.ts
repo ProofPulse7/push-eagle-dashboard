@@ -2742,6 +2742,14 @@ const hasRecentActivity = async (input: {
   }
 
   const sql = getNeonSql();
+
+  let identityFilter = sql``;
+  if (input.productId) {
+    identityFilter = sql`AND product_id = ${input.productId}`;
+  } else if (input.cartToken) {
+    identityFilter = sql`AND cart_token = ${input.cartToken}`;
+  }
+
   const rows = await sql`
     SELECT id
     FROM subscriber_activity_events
@@ -2749,11 +2757,7 @@ const hasRecentActivity = async (input: {
       AND external_id = ${input.externalId}
       AND event_type = ANY(${input.eventTypes})
       AND created_at > ${new Date(input.since)}
-      AND (
-        (${input.productId ?? null} IS NULL AND ${input.cartToken ?? null} IS NULL)
-        OR (${input.productId ?? null} IS NOT NULL AND product_id = ${input.productId ?? null})
-        OR (${input.cartToken ?? null} IS NOT NULL AND cart_token = ${input.cartToken ?? null})
-      )
+      ${identityFilter}
     LIMIT 1
   `;
 
