@@ -75,6 +75,11 @@ type DiagnosticResult = {
       reminder2: string[];
       reminder3: string[];
     };
+    pendingStepDiagnostics: {
+      reminder1: { dueAt: string | null; attempts: number; error: string | null; updatedAt: string | null };
+      reminder2: { dueAt: string | null; attempts: number; error: string | null; updatedAt: string | null };
+      reminder3: { dueAt: string | null; attempts: number; error: string | null; updatedAt: string | null };
+    };
     coreSignals: {
       addToCartEventsLast2Hours: number;
       addToCartExternalIdsLast2Hours: number;
@@ -140,6 +145,7 @@ export async function GET(request: NextRequest) {
       cartWindowRows,
       tokenCoverageRows,
       identityDebugRows,
+      pendingCartStepRows,
     ] = await Promise.all([
       sql`
         SELECT
@@ -405,6 +411,28 @@ export async function GET(request: NextRequest) {
             LIMIT 1
           ) AS latest_add_to_cart_identity_source
       `,
+      sql`
+        SELECT DISTINCT ON (step_key)
+          step_key,
+          due_at,
+          attempts,
+          error_message,
+          updated_at
+        FROM (
+          SELECT
+            COALESCE(payload -> 'metadata' ->> 'stepKey', '') AS step_key,
+            due_at,
+            attempts,
+            error_message,
+            updated_at
+          FROM automation_jobs
+          WHERE shop_domain = ${shopDomain}
+            AND rule_key = 'cart_abandonment_30m'
+            AND status = 'pending'
+            AND COALESCE(payload -> 'metadata' ->> 'stepKey', '') IN ('cart-reminder-1', 'cart-reminder-2', 'cart-reminder-3')
+        ) pending_steps
+        ORDER BY step_key, due_at ASC NULLS LAST, updated_at DESC
+      `,
     ]);
 
     const queueRow = automationQueueRows[0] as Record<string, unknown> | undefined;
@@ -582,6 +610,24 @@ export async function GET(request: NextRequest) {
       reminder3: failedByStep['cart-reminder-3'],
     };
 
+    const pendingStepMap = new Map(
+      (pendingCartStepRows as Array<Record<string, unknown>>).map((row) => [
+        String(row.step_key ?? ''),
+        {
+          dueAt: toIsoOrNull(row.due_at),
+          attempts: Number(row.attempts ?? 0),
+          error: String(row.error_message ?? '').trim() || null,
+          updatedAt: toIsoOrNull(row.updated_at),
+        },
+      ]),
+    );
+
+    const pendingStepDiagnostics: DiagnosticResult['abandonedCartDiagnostics']['pendingStepDiagnostics'] = {
+      reminder1: pendingStepMap.get('cart-reminder-1') ?? { dueAt: null, attempts: 0, error: null, updatedAt: null },
+      reminder2: pendingStepMap.get('cart-reminder-2') ?? { dueAt: null, attempts: 0, error: null, updatedAt: null },
+      reminder3: pendingStepMap.get('cart-reminder-3') ?? { dueAt: null, attempts: 0, error: null, updatedAt: null },
+    };
+
     const activityRow = activityRows[0] as Record<string, unknown> | undefined;
     const cartWindowRow = cartWindowRows[0] as Record<string, unknown> | undefined;
     const tokenCoverageRow = tokenCoverageRows[0] as Record<string, unknown> | undefined;
@@ -694,6 +740,10 @@ export async function GET(request: NextRequest) {
       inferredIssues.push('Some cart reminder jobs are failing; review recent failed reasons per step.');
     }
 
+    if (pendingStepDiagnostics.reminder1.error) {
+      inferredIssues.push(`Reminder-1 pending reason: ${pendingStepDiagnostics.reminder1.error}`);
+    }
+
     const delayedR2 = lagSamples.reminder2.filter((value) => value >= 2).length;
     const delayedR3 = lagSamples.reminder3.filter((value) => value >= 2).length;
     if (delayedR2 > 0 || delayedR3 > 0) {
@@ -713,6 +763,7 @@ export async function GET(request: NextRequest) {
       sendLagDiagnostics,
       inferredIssues,
       recentFailedReasons,
+      pendingStepDiagnostics,
       coreSignals,
     };
 
@@ -933,6 +984,11 @@ export async function GET(request: NextRequest) {
             reminder1: [],
             reminder2: [],
             reminder3: [],
+          },
+          pendingStepDiagnostics: {
+            reminder1: { dueAt: null, attempts: 0, error: null, updatedAt: null },
+            reminder2: { dueAt: null, attempts: 0, error: null, updatedAt: null },
+            reminder3: { dueAt: null, attempts: 0, error: null, updatedAt: null },
           },
           coreSignals: {
             addToCartEventsLast2Hours: 0,
