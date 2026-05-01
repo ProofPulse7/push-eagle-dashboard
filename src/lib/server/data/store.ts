@@ -2309,6 +2309,14 @@ const listAutomationTargets = async (input: { shopDomain: string; externalId?: s
         WHERE t.shop_domain = ${input.shopDomain}
           AND s.id = ${input.subscriberId}
           AND t.status = 'active'
+          AND (
+            COALESCE(t.token_type, 'fcm') <> 'vapid'
+            OR (
+              COALESCE(t.vapid_endpoint, '') <> ''
+              AND COALESCE(t.vapid_p256dh, '') <> ''
+              AND COALESCE(t.vapid_auth, '') <> ''
+            )
+          )
       )
       SELECT token_id, subscriber_id, external_id
       FROM ranked
@@ -2329,6 +2337,14 @@ const listAutomationTargets = async (input: { shopDomain: string; externalId?: s
         WHERE t.shop_domain = ${input.shopDomain}
           AND s.external_id = ${input.externalId ?? ''}
           AND t.status = 'active'
+          AND (
+            COALESCE(t.token_type, 'fcm') <> 'vapid'
+            OR (
+              COALESCE(t.vapid_endpoint, '') <> ''
+              AND COALESCE(t.vapid_p256dh, '') <> ''
+              AND COALESCE(t.vapid_auth, '') <> ''
+            )
+          )
       )
       SELECT token_id, subscriber_id, external_id
       FROM ranked
@@ -2363,6 +2379,14 @@ const listAutomationTargetsByExternalIds = async (shopDomain: string, externalId
       WHERE t.shop_domain = ${shopDomain}
         AND s.external_id = ANY(${externalIds})
         AND t.status = 'active'
+        AND (
+          COALESCE(t.token_type, 'fcm') <> 'vapid'
+          OR (
+            COALESCE(t.vapid_endpoint, '') <> ''
+            AND COALESCE(t.vapid_p256dh, '') <> ''
+            AND COALESCE(t.vapid_auth, '') <> ''
+          )
+        )
     )
     SELECT token_id, subscriber_id, external_id
     FROM ranked
@@ -2398,6 +2422,14 @@ const listAutomationTargetsByClientId = async (shopDomain: string, clientId: str
       WHERE t.shop_domain = ${shopDomain}
         AND s.shop_domain = ${shopDomain}
         AND t.status = 'active'
+        AND (
+          COALESCE(t.token_type, 'fcm') <> 'vapid'
+          OR (
+            COALESCE(t.vapid_endpoint, '') <> ''
+            AND COALESCE(t.vapid_p256dh, '') <> ''
+            AND COALESCE(t.vapid_auth, '') <> ''
+          )
+        )
         AND (
           COALESCE(s.device_context ->> 'clientId', '') = ${normalizedClientId}
           OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ${normalizedClientId}
@@ -3426,6 +3458,14 @@ export const processAutomationJob = async (jobId: string) => {
       WHERE shop_domain = ${claim.shop_domain}
         AND subscriber_id = ${claim.subscriber_id}
         AND status = 'active'
+        AND (
+          COALESCE(token_type, 'fcm') <> 'vapid'
+          OR (
+            COALESCE(vapid_endpoint, '') <> ''
+            AND COALESCE(vapid_p256dh, '') <> ''
+            AND COALESCE(vapid_auth, '') <> ''
+          )
+        )
       ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC
       LIMIT 1
     `;
@@ -3447,6 +3487,14 @@ export const processAutomationJob = async (jobId: string) => {
       WHERE t.shop_domain = ${claim.shop_domain}
         AND s.external_id = ${String(claim.payload.externalId)}
         AND t.status = 'active'
+        AND (
+          COALESCE(t.token_type, 'fcm') <> 'vapid'
+          OR (
+            COALESCE(t.vapid_endpoint, '') <> ''
+            AND COALESCE(t.vapid_p256dh, '') <> ''
+            AND COALESCE(t.vapid_auth, '') <> ''
+          )
+        )
       ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC
       LIMIT 1
     `;
