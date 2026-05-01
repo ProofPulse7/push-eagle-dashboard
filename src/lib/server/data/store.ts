@@ -3980,9 +3980,9 @@ export const processAutomationJob = async (jobId: string) => {
               AND rule_key = 'cart_abandonment_30m'
               AND payload -> 'metadata' ->> 'stepKey' = ${previousStepKey}
               AND (
-                (${payloadExternalId !== ''} AND payload ->> 'externalId' = ${payloadExternalId})
-                OR (${payloadCartToken !== ''} AND payload ->> 'cartToken' = ${payloadCartToken})
-                OR (${claim.subscriber_id != null} AND subscriber_id = ${claim.subscriber_id ?? 0})
+                (${payloadExternalId !== ''}::boolean AND payload ->> 'externalId' = ${payloadExternalId})
+                OR (${payloadCartToken !== ''}::boolean AND payload ->> 'cartToken' = ${payloadCartToken})
+                OR (${claim.subscriber_id != null}::boolean AND subscriber_id = ${claim.subscriber_id ?? 0})
               )
             ORDER BY created_at DESC
             LIMIT 1
