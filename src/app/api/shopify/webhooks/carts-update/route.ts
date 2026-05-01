@@ -90,16 +90,32 @@ const resolveIdentityFromCartSignals = async (shopDomain: string, token?: string
         AND created_at >= NOW() - INTERVAL '14 days'
     ),
     stitched AS (
-      SELECT external_id, created_at
+      SELECT external_id, created_at, client_id
       FROM cart_related
 
       UNION ALL
 
-      SELECT e.external_id, e.created_at
+      SELECT
+        e.external_id,
+        e.created_at,
+        COALESCE(e.metadata ->> 'clientId', e.metadata ->> 'shopifyAnalyticsClientId', '') AS client_id
       FROM subscriber_activity_events e
       WHERE e.shop_domain = ${shopDomain}
         AND e.created_at >= NOW() - INTERVAL '14 days'
         AND COALESCE(e.metadata ->> 'clientId', '') = ANY(
+          ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
+        )
+
+      UNION ALL
+
+      SELECT
+        p.external_id,
+        p.created_at,
+        COALESCE(p.client_id, '') AS client_id
+      FROM pixel_events p
+      WHERE p.shop_domain = ${shopDomain}
+        AND p.created_at >= NOW() - INTERVAL '14 days'
+        AND COALESCE(p.client_id, '') = ANY(
           ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
         )
     )

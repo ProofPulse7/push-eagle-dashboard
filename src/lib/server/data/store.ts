@@ -2533,12 +2533,15 @@ const resolveAutomationExternalIds = async (input: {
           AND created_at >= ${windowStart}
       ),
       stitched AS (
-        SELECT external_id, created_at
+        SELECT external_id, created_at, client_id
         FROM cart_related
 
         UNION ALL
 
-        SELECT e.external_id, e.created_at
+        SELECT
+          e.external_id,
+          e.created_at,
+          COALESCE(e.metadata ->> 'clientId', e.metadata ->> 'shopifyAnalyticsClientId', '') AS client_id
         FROM subscriber_activity_events e
         WHERE e.shop_domain = ${input.shopDomain}
           AND e.created_at >= ${windowStart}
@@ -2548,7 +2551,10 @@ const resolveAutomationExternalIds = async (input: {
 
         UNION ALL
 
-        SELECT p.external_id, p.created_at
+        SELECT
+          p.external_id,
+          p.created_at,
+          COALESCE(p.client_id, '') AS client_id
         FROM pixel_events p
         WHERE p.shop_domain = ${input.shopDomain}
           AND p.created_at >= ${windowStart}
@@ -2556,7 +2562,7 @@ const resolveAutomationExternalIds = async (input: {
             ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
           )
       )
-      SELECT external_id, created_at
+      SELECT external_id, created_at, client_id
       FROM stitched
       WHERE external_id IS NOT NULL
         AND external_id <> ''
