@@ -3970,7 +3970,7 @@ export const processAutomationJob = async (jobId: string) => {
 
         if (!previousStepDeliveryRows[0]?.automation_job_id && hasIdentityForStepOrdering) {
           const previousStepJobRows = await sql`
-            SELECT status
+            SELECT status, attempts, error_message
             FROM automation_jobs
             WHERE shop_domain = ${claim.shop_domain}
               AND rule_key = 'cart_abandonment_30m'
@@ -3987,8 +3987,14 @@ export const processAutomationJob = async (jobId: string) => {
           const previousStepStatus = previousStepJobRows[0]?.status == null
             ? ''
             : String(previousStepJobRows[0].status).toLowerCase();
+          const previousStepAttempts = Number(previousStepJobRows[0]?.attempts ?? 0);
+          const previousStepError = String(previousStepJobRows[0]?.error_message ?? '').trim();
+          const previousStepLooksStuck =
+            previousStepStatus === 'pending'
+            && previousStepAttempts >= 3
+            && previousStepError.length > 0;
 
-          if (previousStepStatus === 'pending' || previousStepStatus === 'processing' || previousStepStatus === 'sent') {
+          if ((previousStepStatus === 'pending' && !previousStepLooksStuck) || previousStepStatus === 'processing' || previousStepStatus === 'sent') {
             const waitMessage = `Waiting for previous cart reminder step (${previousStepKey}) before sending ${payloadStepKey}.`;
             await sql`
               UPDATE automation_jobs
