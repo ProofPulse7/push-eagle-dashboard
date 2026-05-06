@@ -72,7 +72,7 @@ const resolveIdentityFromCartSignals = async (shopDomain: string, token?: string
       SELECT
         external_id,
         created_at,
-        COALESCE(metadata ->> 'clientId', '') AS client_id
+        COALESCE(metadata ->> 'clientId', metadata ->> 'shopifyAnalyticsClientId', '') AS client_id
       FROM subscriber_activity_events
       WHERE shop_domain = ${shopDomain}
         AND cart_token = ${normalizedToken}
