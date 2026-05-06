@@ -38,7 +38,7 @@ export async function POST(request: Request) {
   if (ruleKey) {
     rows = await sql`
       UPDATE automation_jobs
-      SET status = 'pending', attempts = 0, error = NULL, updated_at = NOW()
+      SET status = 'pending', attempts = 0, error_message = NULL, updated_at = NOW()
       WHERE shop_domain = ${shop}
         AND rule_key = ${ruleKey}
         AND status = 'failed'
@@ -47,7 +47,7 @@ export async function POST(request: Request) {
   } else {
     rows = await sql`
       UPDATE automation_jobs
-      SET status = 'pending', attempts = 0, error = NULL, updated_at = NOW()
+      SET status = 'pending', attempts = 0, error_message = NULL, updated_at = NOW()
       WHERE shop_domain = ${shop}
         AND status = 'failed'
       RETURNING id
