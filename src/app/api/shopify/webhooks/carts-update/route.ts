@@ -102,7 +102,7 @@ const resolveIdentityFromCartSignals = async (shopDomain: string, token?: string
       FROM subscriber_activity_events e
       WHERE e.shop_domain = ${shopDomain}
         AND e.created_at >= NOW() - INTERVAL '14 days'
-        AND COALESCE(e.metadata ->> 'clientId', '') = ANY(
+        AND COALESCE(e.metadata ->> 'clientId', e.metadata ->> 'shopifyAnalyticsClientId', '') = ANY(
           ARRAY(SELECT DISTINCT client_id FROM cart_related WHERE client_id <> '')
         )
 
@@ -148,25 +148,40 @@ const resolveIdentityFromCartSignals = async (shopDomain: string, token?: string
 const resolveSubscriberClientId = async (shopDomain: string, externalId?: string | null) => {
   const normalizedExternalId = externalId ? String(externalId).trim() : '';
   if (!normalizedExternalId) {
-    return null;
+    return {
+      clientId: null as string | null,
+      shopifyAnalyticsClientId: null as string | null,
+    };
   }
 
   const sql = getNeonSql();
   const rows = await sql`
-    SELECT s.device_context ->> 'clientId' AS client_id
+    SELECT
+      s.device_context ->> 'clientId' AS client_id,
+      s.device_context ->> 'shopifyAnalyticsClientId' AS shopify_analytics_client_id
     FROM subscribers s
     JOIN subscriber_tokens t ON t.subscriber_id = s.id
     WHERE s.shop_domain = ${shopDomain}
       AND t.shop_domain = ${shopDomain}
       AND t.status = 'active'
       AND s.external_id = ${normalizedExternalId}
-      AND COALESCE(s.device_context ->> 'clientId', '') <> ''
+      AND (
+        COALESCE(s.device_context ->> 'clientId', '') <> ''
+        OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') <> ''
+      )
     ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC
     LIMIT 1
   `;
 
   const clientId = rows[0]?.client_id ? String(rows[0].client_id).trim() : '';
-  return clientId || null;
+  const shopifyAnalyticsClientId = rows[0]?.shopify_analytics_client_id
+    ? String(rows[0].shopify_analytics_client_id).trim()
+    : '';
+
+  return {
+    clientId: clientId || null,
+    shopifyAnalyticsClientId: shopifyAnalyticsClientId || null,
+  };
 };
 
 export async function POST(request: Request) {
@@ -212,9 +227,13 @@ export async function POST(request: Request) {
         ? 'signal'
         : 'fallback_cart_token';
 
+    const subscriberClientIdentity = await resolveSubscriberClientId(shopDomain, externalId);
+    const shopifyAnalyticsClientId = getCartAttribute(payload, '_push_eagle_shopify_analytics_client_id')
+      || subscriberClientIdentity.shopifyAnalyticsClientId;
     const clientId = getCartAttribute(payload, '_push_eagle_client_id')
       || cartSignalIdentity.clientId
-      || await resolveSubscriberClientId(shopDomain, externalId);
+      || subscriberClientIdentity.clientId
+      || shopifyAnalyticsClientId;
 
     const firstLineItem = (payload.line_items ?? [])[0];
     await recordSubscriberActivity({
@@ -230,6 +249,7 @@ export async function POST(request: Request) {
         quantity: firstLineItem?.quantity ?? null,
         updatedAt: payload.updated_at ?? null,
         clientId,
+        shopifyAnalyticsClientId,
         cartIdentitySource: identitySource,
       },
     });
