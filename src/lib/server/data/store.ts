@@ -2770,22 +2770,42 @@ const hasRecentOrder = async (input: {
   customerId?: string | null;
   since?: string | null;
 }) => {
-  if (!input.since || (!input.externalId && !input.customerId)) {
+  const externalId = input.externalId?.trim() || null;
+  const customerId = input.customerId?.trim() || null;
+
+  if (!input.since || (!externalId && !customerId)) {
     return false;
   }
 
   const sql = getNeonSql();
-  const rows = await sql`
-    SELECT id
-    FROM shopify_orders
-    WHERE shop_domain = ${input.shopDomain}
-      AND created_at > ${new Date(input.since)}
-      AND (
-        (${input.externalId ?? null} IS NOT NULL AND external_id = ${input.externalId ?? null})
-        OR (${input.customerId ?? null} IS NOT NULL AND customer_id = ${input.customerId ?? null})
-      )
-    LIMIT 1
-  `;
+  const since = new Date(input.since);
+
+  const rows = externalId && customerId
+    ? await sql`
+      SELECT id
+      FROM shopify_orders
+      WHERE shop_domain = ${input.shopDomain}
+        AND created_at > ${since}
+        AND (external_id = ${externalId} OR customer_id = ${customerId})
+      LIMIT 1
+    `
+    : externalId
+      ? await sql`
+        SELECT id
+        FROM shopify_orders
+        WHERE shop_domain = ${input.shopDomain}
+          AND created_at > ${since}
+          AND external_id = ${externalId}
+        LIMIT 1
+      `
+      : await sql`
+        SELECT id
+        FROM shopify_orders
+        WHERE shop_domain = ${input.shopDomain}
+          AND created_at > ${since}
+          AND customer_id = ${customerId}
+        LIMIT 1
+      `;
 
   return rows.length > 0;
 };
