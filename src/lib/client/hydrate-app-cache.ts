@@ -1,0 +1,91 @@
+import type { QueryClient } from '@tanstack/react-query';
+
+import { queryKeys } from '@/lib/client/query-keys';
+
+export type AppBootstrapPayload = {
+  ok: true;
+  shopDomain: string;
+  merchantOverview: Record<string, unknown>;
+  campaignStats: Record<string, unknown>;
+  subscriberKpis: Record<string, unknown>;
+  automationsOverview: Record<string, unknown>;
+  campaigns: unknown[];
+  segments: unknown[];
+  attribution: Record<string, unknown>;
+  privacy: Record<string, unknown>;
+  branding: Record<string, unknown>;
+  optIn: Record<string, unknown>;
+};
+
+export const hydrateAppCache = (
+  queryClient: QueryClient,
+  shop: string,
+  payload: AppBootstrapPayload,
+) => {
+  const shopDomain = payload.shopDomain || shop;
+
+  queryClient.setQueryData(queryKeys.merchantOverview(shopDomain), {
+    ok: true,
+    ...payload.merchantOverview,
+  });
+
+  queryClient.setQueryData(queryKeys.campaigns(shopDomain), {
+    ok: true,
+    campaigns: payload.campaigns,
+  });
+
+  queryClient.setQueryData(queryKeys.automationsOverview(shopDomain), {
+    ok: true,
+    ...payload.automationsOverview,
+  });
+
+  queryClient.setQueryData(queryKeys.segments(shopDomain), {
+    ok: true,
+    segments: payload.segments,
+  });
+
+  queryClient.setQueryData(queryKeys.attribution(shopDomain), {
+    ok: true,
+    shopDomain,
+    ...payload.attribution,
+  });
+
+  queryClient.setQueryData(queryKeys.privacy(shopDomain), {
+    ok: true,
+    shopDomain,
+    ...payload.privacy,
+  });
+
+  queryClient.setQueryData(queryKeys.branding(shopDomain), {
+    ok: true,
+    shopDomain,
+    ...payload.branding,
+  });
+
+  queryClient.setQueryData(queryKeys.optIn(shopDomain), {
+    ok: true,
+    shopDomain,
+    ...payload.optIn,
+  });
+
+  queryClient.setQueryData(queryKeys.subscribersOverview(shopDomain), {
+    ok: true,
+    ...payload.subscriberKpis,
+  });
+
+  const now = new Date();
+  const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const to = now.toISOString();
+
+  queryClient.setQueryData(queryKeys.dashboardSummary(shopDomain), {
+    ok: true,
+    merchantOverview: payload.merchantOverview,
+    campaignStats: payload.campaignStats,
+    subscriberKpis: payload.subscriberKpis,
+  });
+
+  queryClient.setQueryData(queryKeys.campaignStats(shopDomain, from, to), {
+    ok: true,
+    ...payload.campaignStats,
+  });
+};

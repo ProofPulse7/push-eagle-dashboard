@@ -243,34 +243,41 @@ export default function SettingsPage() {
             return;
         }
 
-        const response = await fetch('/api/settings/attribution', {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                shopDomain,
-                attributionModel,
-                attributionCreditMode,
-                clickWindowDays,
-                impressionWindowDays,
-            }),
+        toast({
+            title: 'Attribution settings saved',
+            description: 'Syncing with server in the background.',
         });
 
-        const result = await response.json();
-        if (!response.ok || !result?.ok) {
+        try {
+            const response = await fetch('/api/settings/attribution', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    shopDomain,
+                    attributionModel,
+                    attributionCreditMode,
+                    clickWindowDays,
+                    impressionWindowDays,
+                }),
+            });
+
+            const result = await response.json();
+            if (!response.ok || !result?.ok) {
+                toast({
+                    variant: 'destructive',
+                    title: 'Failed to save attribution settings',
+                    description: result?.error ?? 'Unexpected error while saving attribution settings.',
+                });
+            }
+        } catch {
             toast({
                 variant: 'destructive',
                 title: 'Failed to save attribution settings',
-                description: result?.error ?? 'Unexpected error while saving attribution settings.',
+                description: 'Network error while saving attribution settings.',
             });
-            return;
         }
-
-        toast({
-            title: 'Attribution settings saved',
-            description: 'Your attribution model and windows are now active.',
-        });
     };
 
     const syncFromShopify = async () => {

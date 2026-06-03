@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import type { DateRange } from 'react-day-picker';
 import { BarChart, DollarSign, MousePointerClick, TrendingUp, Users } from "lucide-react";
 import type { LucideIcon } from 'lucide-react';
@@ -15,7 +15,8 @@ import { DevicePerformance } from "@/components/analytics/device-performance";
 import { formatCurrency } from "@/lib/utils";
 import { DateRangePicker } from '@/components/analytics/date-range-picker';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useSettings } from '@/context/settings-context';
+import { useAnalyticsStats } from '@/hooks/queries/use-app-queries';
+import { useShopDomain } from '@/hooks/use-shop-domain';
 
 type KpiItem = {
   title: string;
@@ -25,48 +26,29 @@ type KpiItem = {
 };
 
 export default function AnalyticsPage() {
-    const { shopDomain: settingsShop } = useSettings();
-    const [queryShop, setQueryShop] = useState('');
-    const shopDomain = queryShop || settingsShop || '';
-
+    const shopDomain = useShopDomain();
     const [date, setDate] = useState<DateRange | undefined>(undefined);
-    const [loading, setLoading] = useState(true);
-    const [kpis, setKpis] = useState<KpiItem[]>([]);
 
-    useEffect(() => {
-        setQueryShop(new URLSearchParams(window.location.search).get('shop') || '');
-    }, []);
+    const from = date?.from ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const to = date?.to ?? new Date();
+    const { data: payload, isLoading, isFetching } = useAnalyticsStats(from, to);
 
-    useEffect(() => {
+    const kpis = useMemo<KpiItem[]>(() => {
         if (!shopDomain) {
-            setKpis([
+            return [
                 { title: "Total Revenue", value: formatCurrency(0), change: 'No shop connected', icon: DollarSign },
                 { title: "New Subscribers", value: '0', change: 'No shop connected', icon: Users },
                 { title: "Avg. Click Rate", value: '0%', change: 'No shop connected', icon: MousePointerClick },
                 { title: "Total Impressions", value: '0', change: 'No shop connected', icon: TrendingUp },
-            ]);
-            setLoading(false);
-            return;
+            ];
         }
 
-        let active = true;
-        setLoading(true);
-
-        const from = date?.from ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-        const to = date?.to ?? new Date();
-
-        fetch(
-            `/api/analytics/stats?shop=${encodeURIComponent(shopDomain)}&from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`,
-        )
-            .then((res) => res.json())
-            .then((payload) => {
-                if (!active || !payload?.ok) return;
-                const { kpis: k } = payload;
-                setKpis([
+        const k = (payload?.kpis ?? {}) as Record<string, number>;
+        return [
                     {
                         title: "Total Revenue",
                         value: formatCurrency((k?.totalRevenueCents ?? 0) / 100),
-                        change: `${k?.totalRevenueCents > 0 ? 'Revenue attributed via push' : 'No revenue yet'}`,
+                        change: `${(k?.totalRevenueCents ?? 0) > 0 ? 'Revenue attributed via push' : 'No revenue yet'}`,
                         icon: DollarSign,
                     },
                     {
@@ -87,15 +69,10 @@ export default function AnalyticsPage() {
                         change: 'Campaigns + automations',
                         icon: TrendingUp,
                     },
-                ]);
-            })
-            .catch(() => undefined)
-            .finally(() => {
-                if (active) setLoading(false);
-            });
+                ];
+    }, [shopDomain, payload]);
 
-        return () => { active = false; };
-    }, [shopDomain, date]);
+    const loading = isLoading && !payload;
 
     if (loading) {
         return (
@@ -138,6 +115,10 @@ export default function AnalyticsPage() {
                 </div>
                 <DateRangePicker date={date} setDate={setDate} />
             </div>
+
+            {isFetching && payload ? (
+                <p className="text-xs text-muted-foreground">Refreshing analytics…</p>
+            ) : null}
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                 {kpis.map((kpi) => (

@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useSettings } from '@/context/settings-context';
+import { useSegments } from '@/hooks/queries/use-app-queries';
 
 type SegmentRow = {
   id: string;
@@ -283,36 +284,23 @@ export default function SegmentsPage() {
     setResolvedShopDomain(candidate);
   }, [shopDomain]);
 
+  const { data: segmentsPayload } = useSegments();
+
   useEffect(() => {
-    if (!resolvedShopDomain) {
+    if (!segmentsPayload?.segments) {
       return;
     }
 
-    const loadSegments = async () => {
-      try {
-        const response = await fetch(`/api/segments?shop=${encodeURIComponent(resolvedShopDomain)}`, { cache: 'no-store' });
-        const json = await response.json();
-
-        if (!response.ok || !json?.ok) {
-          throw new Error(json?.error ?? 'Failed to load segments.');
-        }
-
-        setSegments(
-          ((json.segments || []) as SegmentApiRow[]).map((segment) => ({
-            id: String(segment.id),
-            name: String(segment.name),
-            type: String(segment.type ?? 'Dynamic'),
-            subscribers: Number(segment.subscriberCount ?? 0).toLocaleString(),
-            criteria: String(segment.criteria ?? 'Custom audience criteria'),
-          })),
-        );
-      } catch (error) {
-        console.error('Failed to load segments', error);
-      }
-    };
-
-    void loadSegments();
-  }, [resolvedShopDomain]);
+    setSegments(
+      ((segmentsPayload.segments || []) as SegmentApiRow[]).map((segment) => ({
+        id: String(segment.id),
+        name: String(segment.name),
+        type: String(segment.type ?? 'Dynamic'),
+        subscribers: Number(segment.subscriberCount ?? 0).toLocaleString(),
+        criteria: String(segment.criteria ?? 'Custom audience criteria'),
+      })),
+    );
+  }, [segmentsPayload]);
 
   const paginatedAttributes = customAttributes.slice(
     (currentPage - 1) * ITEMS_PER_PAGE,
