@@ -120,12 +120,9 @@ export function CampaignsTable({ dateRange }: { dateRange: DateRange | undefined
 
     useEffect(() => {
         if (!data?.campaigns) {
-            if (!shopDomain) {
-                setCampaigns([]);
-            }
+            if (!shopDomain) setCampaigns([]);
             return;
         }
-
         setCampaigns((data.campaigns as unknown[]).map(mapApiCampaign));
         setError(null);
     }, [data, shopDomain]);

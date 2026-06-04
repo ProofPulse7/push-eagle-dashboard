@@ -913,6 +913,7 @@ const ensureSchema = async () => {
         WHERE s.ctid = r.ctid AND r.rn > 1
       `;
       await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_subscribers_shop_external_id ON subscribers(shop_domain, external_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_subscribers_shop_created ON subscribers(shop_domain, created_at DESC)`;
 
       await sql`
         WITH ranked AS (

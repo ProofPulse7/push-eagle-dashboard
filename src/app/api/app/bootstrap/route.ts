@@ -8,7 +8,9 @@ import {
   getMerchantOverview,
   getOptInSettings,
   getPrivacySettings,
+  getSubscriberBreakdown,
   getSubscriberKpis,
+  getSubscriberLocationBreakdown,
   listCampaigns,
   listSegments,
 } from '@/lib/server/data/store';
@@ -28,6 +30,8 @@ export async function GET(request: Request) {
       merchantOverview,
       campaignStats,
       subscriberKpis,
+      subscriberBreakdown,
+      subscriberLocations,
       automationsOverview,
       campaigns,
       segments,
@@ -39,6 +43,8 @@ export async function GET(request: Request) {
       getMerchantOverview(shopDomain),
       getCampaignStats(shopDomain),
       getSubscriberKpis(shopDomain),
+      getSubscriberBreakdown(shopDomain),
+      getSubscriberLocationBreakdown(shopDomain),
       getAutomationOverview(shopDomain),
       listCampaigns(shopDomain, 100),
       listSegments(shopDomain),
@@ -48,6 +54,15 @@ export async function GET(request: Request) {
       getOptInSettings(shopDomain),
     ]);
 
+    const subscriberOverview = {
+      shopDomain,
+      ...subscriberKpis,
+      browsers: subscriberBreakdown.browsers,
+      platforms: subscriberBreakdown.platforms,
+      countries: subscriberLocations.countries,
+      cities: subscriberLocations.cities,
+    };
+
     return NextResponse.json(
       {
         ok: true,
@@ -55,6 +70,7 @@ export async function GET(request: Request) {
         merchantOverview,
         campaignStats,
         subscriberKpis,
+        subscriberOverview,
         automationsOverview,
         campaigns,
         segments,

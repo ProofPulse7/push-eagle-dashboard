@@ -1,6 +1,7 @@
 'use client';
 
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -31,12 +32,16 @@ export function useAppBootstrap() {
   });
 }
 
+const SETTINGS_STALE_MS = 5 * 60 * 1000;
+
 export function useMerchantOverview() {
   const shop = useShopDomain();
   return useQuery({
     queryKey: queryKeys.merchantOverview(shop),
     queryFn: () => fetchJsonWithShop<Record<string, unknown>>('/api/settings/overview', shop),
     enabled: Boolean(shop),
+    staleTime: SETTINGS_STALE_MS,
+    placeholderData: (previous) => previous,
   });
 }
 
@@ -47,6 +52,7 @@ export function useCampaigns() {
     queryFn: () =>
       fetchJsonWithShop<{ campaigns: unknown[] }>('/api/campaigns', shop),
     enabled: Boolean(shop),
+    placeholderData: (previous) => previous,
   });
 }
 
@@ -60,6 +66,7 @@ export function useAutomationsOverview() {
         shop,
       ),
     enabled: Boolean(shop),
+    placeholderData: (previous) => previous,
   });
 }
 
@@ -70,6 +77,8 @@ export function useSegments() {
     queryFn: () =>
       fetchJsonWithShop<{ segments: unknown[] }>('/api/segments', shop),
     enabled: Boolean(shop),
+    staleTime: SETTINGS_STALE_MS,
+    placeholderData: (previous) => previous,
   });
 }
 
@@ -80,6 +89,7 @@ export function useSubscribersOverview() {
     queryFn: () =>
       fetchJsonWithShop<Record<string, unknown>>('/api/subscribers/overview', shop),
     enabled: Boolean(shop),
+    placeholderData: (previous) => previous,
   });
 }
 
@@ -90,6 +100,8 @@ export function useAttributionSettings() {
     queryFn: () =>
       fetchJsonWithShop<Record<string, unknown>>('/api/settings/attribution', shop),
     enabled: Boolean(shop),
+    staleTime: SETTINGS_STALE_MS,
+    placeholderData: (previous) => previous,
   });
 }
 
@@ -100,6 +112,8 @@ export function usePrivacySettings() {
     queryFn: () =>
       fetchJsonWithShop<Record<string, unknown>>('/api/settings/privacy', shop),
     enabled: Boolean(shop),
+    staleTime: SETTINGS_STALE_MS,
+    placeholderData: (previous) => previous,
   });
 }
 
@@ -109,6 +123,50 @@ export function useBrandingSettings() {
     queryKey: queryKeys.branding(shop),
     queryFn: () =>
       fetchJsonWithShop<Record<string, unknown>>('/api/settings/branding', shop),
+    enabled: Boolean(shop),
+    staleTime: SETTINGS_STALE_MS,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useCampaignStats(from?: Date, to?: Date) {
+  const shop = useShopDomain();
+  const fromIso = from?.toISOString() ?? '';
+  const toIso = to?.toISOString() ?? '';
+
+  return useQuery({
+    queryKey: queryKeys.campaignStats(shop, fromIso, toIso),
+    queryFn: () => {
+      const params = new URLSearchParams({ shop });
+      if (fromIso) params.set('from', fromIso);
+      if (toIso) params.set('to', toIso);
+      return fetchJson<Record<string, unknown>>(`/api/campaigns/stats?${params.toString()}`);
+    },
+    enabled: Boolean(shop),
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useSubscribersList(sortOrder: 'asc' | 'desc', pageSize = 100) {
+  const shop = useShopDomain();
+
+  return useInfiniteQuery({
+    queryKey: queryKeys.subscribersList(shop, pageSize, 0, sortOrder),
+    queryFn: ({ pageParam }) =>
+      fetchJson<Record<string, unknown>>(
+        `/api/subscribers/list?shop=${encodeURIComponent(shop)}&limit=${pageSize}&offset=${pageParam}&sort=${sortOrder}`,
+      ),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      if (!lastPage?.ok || !lastPage.hasMore) {
+        return undefined;
+      }
+      const loaded = allPages.reduce(
+        (sum, page) => sum + (Array.isArray(page.subscribers) ? page.subscribers.length : 0),
+        0,
+      );
+      return loaded;
+    },
     enabled: Boolean(shop),
   });
 }
@@ -129,6 +187,7 @@ export function useDashboardSummary() {
       return { overview, campaignStats, subscriberKpis };
     },
     enabled: Boolean(shop),
+    placeholderData: (previous) => previous,
   });
 }
 
@@ -144,6 +203,56 @@ export function useAnalyticsStats(from: Date, to: Date) {
         `/api/analytics/stats?shop=${encodeURIComponent(shop)}&from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`,
       ),
     enabled: Boolean(shop),
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useSubscriberGrowth(from: Date, to: Date) {
+  const shop = useShopDomain();
+  const fromIso = from.toISOString();
+  const toIso = to.toISOString();
+
+  return useQuery({
+    queryKey: queryKeys.subscribersGrowth(shop, fromIso, toIso),
+    queryFn: () =>
+      fetchJson<Record<string, unknown>>(
+        `/api/subscribers/growth?shop=${encodeURIComponent(shop)}&from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`,
+      ),
+    enabled: Boolean(shop),
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useSaveBrandingSettings() {
+  const shop = useShopDomain();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (body: Record<string, unknown>) =>
+      fetchJson<Record<string, unknown>>('/api/settings/branding', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shopDomain: shop, ...body }),
+      }),
+    onMutate: async (body) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.branding(shop) });
+      const previous = queryClient.getQueryData<Record<string, unknown>>(queryKeys.branding(shop));
+      queryClient.setQueryData(queryKeys.branding(shop), {
+        ok: true,
+        shopDomain: shop,
+        ...previous,
+        ...body,
+      });
+      return { previous };
+    },
+    onError: (_error, _body, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(queryKeys.branding(shop), context.previous);
+      }
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.branding(shop) });
+    },
   });
 }
 

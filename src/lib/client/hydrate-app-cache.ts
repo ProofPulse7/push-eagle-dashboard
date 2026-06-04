@@ -8,6 +8,7 @@ export type AppBootstrapPayload = {
   merchantOverview: Record<string, unknown>;
   campaignStats: Record<string, unknown>;
   subscriberKpis: Record<string, unknown>;
+  subscriberOverview?: Record<string, unknown>;
   automationsOverview: Record<string, unknown>;
   campaigns: unknown[];
   segments: unknown[];
@@ -68,10 +69,19 @@ export const hydrateAppCache = (
     ...payload.optIn,
   });
 
-  queryClient.setQueryData(queryKeys.subscribersOverview(shopDomain), {
-    ok: true,
-    ...payload.subscriberKpis,
-  });
+  if (payload.subscriberOverview) {
+    queryClient.setQueryData(queryKeys.subscribersOverview(shopDomain), {
+      ok: true,
+      shopDomain,
+      ...payload.subscriberOverview,
+    });
+  } else if (payload.subscriberKpis) {
+    queryClient.setQueryData(queryKeys.subscribersOverview(shopDomain), {
+      ok: true,
+      shopDomain,
+      ...payload.subscriberKpis,
+    });
+  }
 
   const now = new Date();
   const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -86,6 +96,6 @@ export const hydrateAppCache = (
 
   queryClient.setQueryData(queryKeys.campaignStats(shopDomain, from, to), {
     ok: true,
-    ...payload.campaignStats,
+    stats: payload.campaignStats,
   });
 };

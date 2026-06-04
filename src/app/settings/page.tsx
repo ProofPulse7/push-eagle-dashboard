@@ -1,7 +1,16 @@
 
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  useMerchantOverview,
+  usePrivacySettings,
+  useSaveAttributionSettings,
+  useSaveBrandingSettings,
+  useSavePrivacySettings,
+} from '@/hooks/queries/use-app-queries';
+import { queryKeys } from '@/lib/client/query-keys';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -88,134 +97,59 @@ export default function SettingsPage() {
     const [emailStoreOption, setEmailStoreOption] = useState<'full-email' | 'hash-email' | 'no-email'>('full-email');
     const [locationStoreOption, setLocationStoreOption] = useState<'yes' | 'no'>('yes');
     const [nameStoreOption, setNameStoreOption] = useState<'yes' | 'no'>('yes');
-        const [savingPrivacy, setSavingPrivacy] = useState(false);
-        const [savingBranding, setSavingBranding] = useState(false);
-    const [overview, setOverview] = useState<MerchantOverview | null>(null);
-    const [overviewRefreshTick, setOverviewRefreshTick] = useState(0);
     const [syncingShopify, setSyncingShopify] = useState(false);
+    const queryClient = useQueryClient();
+    const { data: overviewData } = useMerchantOverview();
+    const { data: privacyData } = usePrivacySettings();
+    const saveAttributionMutation = useSaveAttributionSettings();
+    const saveBrandingMutation = useSaveBrandingSettings();
+    const savePrivacyMutation = useSavePrivacySettings();
   
   const [editingState, setEditingState] = useState<{ url: string; aspect: number, type: string } | null>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
 
+    const overview = useMemo<MerchantOverview | null>(() => {
+        if (!overviewData?.ok) {
+            return null;
+        }
+
+        return {
+            storeName: (overviewData.storeName as string | null) ?? null,
+            email: (overviewData.email as string | null) ?? null,
+            storeUrl: (overviewData.storeUrl as string | null) ?? null,
+            myshopifyDomain: String(overviewData.myshopifyDomain ?? shopDomain),
+            currencyCode: (overviewData.currencyCode as string | null) ?? null,
+            timezone: (overviewData.timezone as string | null) ?? null,
+            planName: (overviewData.planName as string | null) ?? null,
+            ownerName: (overviewData.ownerName as string | null) ?? null,
+            scopes: (overviewData.scopes as string | null) ?? null,
+            subscriberCount: Number(overviewData.subscriberCount ?? 0),
+            customerCount: Number(overviewData.customerCount ?? 0),
+            campaignCount: Number(overviewData.campaignCount ?? 0),
+            uninstalledAt: (overviewData.uninstalledAt as string | null) ?? null,
+        };
+    }, [overviewData, shopDomain]);
+
     useEffect(() => {
-        if (!shopDomain) {
+        if (!privacyData?.ok) {
             return;
         }
 
-        let isMounted = true;
-        fetch(`/api/settings/attribution?shop=${encodeURIComponent(shopDomain)}`)
-            .then(async (res) => {
-                const data = await res.json();
-                if (!res.ok || !data?.ok || !isMounted) {
-                    return;
-                }
-                setAttributionModel(data.attributionModel);
-                setAttributionCreditMode(data.attributionCreditMode ?? 'last_touch');
-                setClickWindowDays(data.clickWindowDays);
-                setImpressionWindowDays(data.impressionWindowDays);
-            })
-            .catch(() => undefined);
-
-        return () => {
-            isMounted = false;
-        };
-    }, [shopDomain, setAttributionModel, setAttributionCreditMode, setClickWindowDays, setImpressionWindowDays]);
-
-    useEffect(() => {
-        if (!shopDomain) {
-            return;
-        }
-
-        let isMounted = true;
-        fetch(`/api/settings/privacy?shop=${encodeURIComponent(shopDomain)}`)
-            .then(async (res) => {
-                const data = await res.json();
-                if (!res.ok || !data?.ok || !isMounted) {
-                    return;
-                }
-
-                setAllowSupport(Boolean(data.allowSupport));
-                setIpAddressOption((String(data.ipAddressOption || 'anonymized') as 'anonymized' | 'no-ip'));
-                setEnableGeo(Boolean(data.enableGeo));
-                setEnablePreferences(Boolean(data.enablePreferences));
-                setEmailStoreOption((String(data.emailStoreOption || 'full-email') as 'full-email' | 'hash-email' | 'no-email'));
-                setLocationStoreOption((String(data.locationStoreOption || 'yes') as 'yes' | 'no'));
-                setNameStoreOption((String(data.nameStoreOption || 'yes') as 'yes' | 'no'));
-            })
-            .catch(() => undefined);
-
-        return () => {
-            isMounted = false;
-        };
-    }, [shopDomain]);
-
-    useEffect(() => {
-        if (!shopDomain) {
-            return;
-        }
-
-        let isMounted = true;
-        fetch(`/api/settings/branding?shop=${encodeURIComponent(shopDomain)}`)
-            .then(async (res) => {
-                const data = await res.json();
-                if (!res.ok || !data?.ok || !isMounted) {
-                    return;
-                }
-
-                if (data.logoUrl) {
-                    setLogo({ file: null, preview: String(data.logoUrl) });
-                }
-            })
-            .catch(() => undefined);
-
-        return () => {
-            isMounted = false;
-        };
-    }, [shopDomain, setLogo]);
-
-    useEffect(() => {
-        let isMounted = true;
-        const overviewUrl = shopDomain
-            ? `/api/settings/overview?shop=${encodeURIComponent(shopDomain)}`
-            : '/api/settings/overview';
-
-        fetch(overviewUrl)
-            .then(async (res) => {
-                const data = await res.json();
-                if (!res.ok || !data?.ok || !isMounted) {
-                    return;
-                }
-
-                setOverview({
-                    storeName: data.storeName ?? null,
-                    email: data.email ?? null,
-                    storeUrl: data.storeUrl ?? null,
-                    myshopifyDomain: data.myshopifyDomain ?? shopDomain,
-                    currencyCode: data.currencyCode ?? null,
-                    timezone: data.timezone ?? null,
-                    planName: data.planName ?? null,
-                    ownerName: data.ownerName ?? null,
-                    scopes: data.scopes ?? null,
-                    subscriberCount: Number(data.subscriberCount ?? 0),
-                    customerCount: Number(data.customerCount ?? 0),
-                    campaignCount: Number(data.campaignCount ?? 0),
-                    uninstalledAt: data.uninstalledAt ?? null,
-                });
-
-                if (data.shopDomain && data.shopDomain !== shopDomain) {
-                    setShopDomain(data.shopDomain);
-                }
-
-                if (data.storeUrl && data.storeUrl !== storeUrl) {
-                    setStoreUrl(data.storeUrl);
-                }
-            })
-            .catch(() => undefined);
-
-        return () => {
-            isMounted = false;
-        };
-    }, [shopDomain, setShopDomain, setStoreUrl, storeUrl, overviewRefreshTick]);
+        setAllowSupport(Boolean(privacyData.allowSupport));
+        setIpAddressOption(
+            String(privacyData.ipAddressOption || 'anonymized') as 'anonymized' | 'no-ip',
+        );
+        setEnableGeo(Boolean(privacyData.enableGeo));
+        setEnablePreferences(Boolean(privacyData.enablePreferences));
+        setEmailStoreOption(
+            String(privacyData.emailStoreOption || 'full-email') as
+                | 'full-email'
+                | 'hash-email'
+                | 'no-email',
+        );
+        setLocationStoreOption(String(privacyData.locationStoreOption || 'yes') as 'yes' | 'no');
+        setNameStoreOption(String(privacyData.nameStoreOption || 'yes') as 'yes' | 'no');
+    }, [privacyData]);
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -233,7 +167,7 @@ export default function SettingsPage() {
     setEditingState(null);
   };
 
-    const saveAttributionSettings = async () => {
+    const saveAttributionSettings = () => {
         if (!shopDomain) {
             toast({
                 variant: 'destructive',
@@ -245,39 +179,29 @@ export default function SettingsPage() {
 
         toast({
             title: 'Attribution settings saved',
-            description: 'Syncing with server in the background.',
+            description: 'Your attribution model and windows are now active.',
         });
 
-        try {
-            const response = await fetch('/api/settings/attribution', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
+        saveAttributionMutation.mutate(
+            {
+                attributionModel,
+                attributionCreditMode,
+                clickWindowDays,
+                impressionWindowDays,
+            },
+            {
+                onError: (error) => {
+                    toast({
+                        variant: 'destructive',
+                        title: 'Failed to save attribution settings',
+                        description:
+                            error instanceof Error
+                                ? error.message
+                                : 'Unexpected error while saving attribution settings.',
+                    });
                 },
-                body: JSON.stringify({
-                    shopDomain,
-                    attributionModel,
-                    attributionCreditMode,
-                    clickWindowDays,
-                    impressionWindowDays,
-                }),
-            });
-
-            const result = await response.json();
-            if (!response.ok || !result?.ok) {
-                toast({
-                    variant: 'destructive',
-                    title: 'Failed to save attribution settings',
-                    description: result?.error ?? 'Unexpected error while saving attribution settings.',
-                });
-            }
-        } catch {
-            toast({
-                variant: 'destructive',
-                title: 'Failed to save attribution settings',
-                description: 'Network error while saving attribution settings.',
-            });
-        }
+            },
+        );
     };
 
     const syncFromShopify = async () => {
@@ -312,7 +236,9 @@ export default function SettingsPage() {
                 return;
             }
 
-            setOverviewRefreshTick((value) => value + 1);
+            void queryClient.invalidateQueries({
+                queryKey: queryKeys.merchantOverview(shopDomain || overview?.myshopifyDomain || ''),
+            });
             toast({
                 title: 'Shopify sync complete',
                 description: 'Store details were refreshed from Shopify.',
@@ -330,7 +256,7 @@ export default function SettingsPage() {
 
     const activeShopDomain = shopDomain || overview?.myshopifyDomain || '';
 
-    const saveBrandingSettings = async () => {
+    const saveBrandingSettings = () => {
         if (!activeShopDomain) {
             toast({
                 variant: 'destructive',
@@ -340,45 +266,26 @@ export default function SettingsPage() {
             return;
         }
 
-        setSavingBranding(true);
-        try {
-            const response = await fetch('/api/settings/branding', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
+        toast({
+            title: 'Branding settings saved',
+            description: 'Your logo has been saved for this store.',
+        });
+
+        saveBrandingMutation.mutate(
+            { logoUrl: logo.preview || null },
+            {
+                onError: () => {
+                    toast({
+                        variant: 'destructive',
+                        title: 'Failed to save branding settings',
+                        description: 'Unexpected error while saving branding settings.',
+                    });
                 },
-                body: JSON.stringify({
-                    shopDomain: activeShopDomain,
-                    logoUrl: logo.preview || null,
-                }),
-            });
-
-            const result = await response.json();
-            if (!response.ok || !result?.ok) {
-                toast({
-                    variant: 'destructive',
-                    title: 'Failed to save branding settings',
-                    description: result?.error ?? 'Unexpected error while saving branding settings.',
-                });
-                return;
-            }
-
-            toast({
-                title: 'Branding settings saved',
-                description: 'Your logo has been saved for this store.',
-            });
-        } catch {
-            toast({
-                variant: 'destructive',
-                title: 'Failed to save branding settings',
-                description: 'Unexpected error while saving branding settings.',
-            });
-        } finally {
-            setSavingBranding(false);
-        }
+            },
+        );
     };
 
-    const savePrivacySettings = async () => {
+    const savePrivacySettings = () => {
         if (!activeShopDomain) {
             toast({
                 variant: 'destructive',
@@ -388,48 +295,31 @@ export default function SettingsPage() {
             return;
         }
 
-        setSavingPrivacy(true);
-        try {
-            const response = await fetch('/api/settings/privacy', {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
+        toast({
+            title: 'Privacy settings saved',
+            description: 'Your privacy preferences are now active.',
+        });
+
+        savePrivacyMutation.mutate(
+            {
+                allowSupport,
+                ipAddressOption,
+                enableGeo,
+                enablePreferences,
+                emailStoreOption,
+                locationStoreOption,
+                nameStoreOption,
+            },
+            {
+                onError: () => {
+                    toast({
+                        variant: 'destructive',
+                        title: 'Failed to save privacy settings',
+                        description: 'Unexpected error while saving privacy settings.',
+                    });
                 },
-                body: JSON.stringify({
-                    shopDomain: activeShopDomain,
-                    allowSupport,
-                    ipAddressOption,
-                    enableGeo,
-                    enablePreferences,
-                    emailStoreOption,
-                    locationStoreOption,
-                    nameStoreOption,
-                }),
-            });
-
-            const result = await response.json();
-            if (!response.ok || !result?.ok) {
-                toast({
-                    variant: 'destructive',
-                    title: 'Failed to save privacy settings',
-                    description: result?.error ?? 'Unexpected error while saving privacy settings.',
-                });
-                return;
-            }
-
-            toast({
-                title: 'Privacy settings saved',
-                description: 'Your privacy preferences are now active.',
-            });
-        } catch {
-            toast({
-                variant: 'destructive',
-                title: 'Failed to save privacy settings',
-                description: 'Unexpected error while saving privacy settings.',
-            });
-        } finally {
-            setSavingPrivacy(false);
-        }
+            },
+        );
     };
 
 
@@ -474,7 +364,11 @@ export default function SettingsPage() {
                         <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => setOverviewRefreshTick((value) => value + 1)}
+                            onClick={() =>
+                                void queryClient.invalidateQueries({
+                                    queryKey: queryKeys.merchantOverview(activeShopDomain),
+                                })
+                            }
                         >
                             Refresh details
                         </Button>
@@ -492,8 +386,8 @@ export default function SettingsPage() {
                             <div className="flex items-center gap-2">
                                 <Button variant="ghost" size="icon" onClick={() => logo.preview && setEditingState({url: logo.preview, aspect: 1, type: 'logo'})} disabled={!logo.preview}><Crop className="h-4 w-4" /></Button>
                                 <Button variant="ghost" size="icon" onClick={() => logoInputRef.current?.click()}><Upload className="h-4 w-4" /></Button>
-                                <Button variant="outline" size="sm" onClick={saveBrandingSettings} disabled={savingBranding}>
-                                    {savingBranding ? 'Saving...' : 'Save Logo'}
+                                <Button variant="outline" size="sm" onClick={saveBrandingSettings} disabled={saveBrandingMutation.isPending}>
+                                    {saveBrandingMutation.isPending ? 'Saving...' : 'Save Logo'}
                                 </Button>
                                 <Input type="file" ref={logoInputRef} className="hidden" accept="image/*" onChange={handleLogoUpload} />
                             </div>
@@ -715,8 +609,8 @@ export default function SettingsPage() {
                         </CardContent>
                     </Card>
                     <div className="flex justify-end">
-                        <Button onClick={savePrivacySettings} disabled={savingPrivacy}>
-                            {savingPrivacy ? 'Saving...' : 'Save Privacy Settings'}
+                        <Button onClick={savePrivacySettings} disabled={savePrivacyMutation.isPending}>
+                            {savePrivacyMutation.isPending ? 'Saving...' : 'Save Privacy Settings'}
                         </Button>
                     </div>
                 </div>

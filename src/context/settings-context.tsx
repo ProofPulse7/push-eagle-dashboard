@@ -85,7 +85,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         }
     }, []);
 
-    // Server settings are loaded via AppBootstrapLoader + React Query (session cache).
+    // Merchant settings sync from React Query cache: SettingsCacheSync + bootstrap.
 
     const setStoreUrl = (url: string) => {
         setStoreUrlState(url);

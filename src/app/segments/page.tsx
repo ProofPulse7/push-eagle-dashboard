@@ -1,7 +1,8 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useMemo, useState, useEffect } from 'react';
+import { useSegments } from '@/hooks/queries/use-app-queries';
 import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,7 +18,6 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useSettings } from '@/context/settings-context';
-import { useSegments } from '@/hooks/queries/use-app-queries';
 
 type SegmentRow = {
   id: string;
@@ -269,7 +269,7 @@ const AddAttributeDialog = ({
 
 export default function SegmentsPage() {
   const { shopDomain } = useSettings();
-  const [segments, setSegments] = useState(initialSegments);
+  const { data: segmentsData } = useSegments();
   const [resolvedShopDomain, setResolvedShopDomain] = useState('');
   const [customAttributes, setCustomAttributes] = useState(initialCustomAttributes);
   const [currentPage, setCurrentPage] = useState(1);
@@ -284,23 +284,20 @@ export default function SegmentsPage() {
     setResolvedShopDomain(candidate);
   }, [shopDomain]);
 
-  const { data: segmentsPayload } = useSegments();
-
-  useEffect(() => {
-    if (!segmentsPayload?.segments) {
-      return;
+  const segments = useMemo(() => {
+    const rows = segmentsData?.segments;
+    if (!Array.isArray(rows)) {
+      return initialSegments;
     }
 
-    setSegments(
-      ((segmentsPayload.segments || []) as SegmentApiRow[]).map((segment) => ({
-        id: String(segment.id),
-        name: String(segment.name),
-        type: String(segment.type ?? 'Dynamic'),
-        subscribers: Number(segment.subscriberCount ?? 0).toLocaleString(),
-        criteria: String(segment.criteria ?? 'Custom audience criteria'),
-      })),
-    );
-  }, [segmentsPayload]);
+    return (rows as SegmentApiRow[]).map((segment) => ({
+      id: String(segment.id),
+      name: String(segment.name),
+      type: String(segment.type ?? 'Dynamic'),
+      subscribers: Number(segment.subscriberCount ?? 0).toLocaleString(),
+      criteria: String(segment.criteria ?? 'Custom audience criteria'),
+    }));
+  }, [segmentsData]);
 
   const paginatedAttributes = customAttributes.slice(
     (currentPage - 1) * ITEMS_PER_PAGE,

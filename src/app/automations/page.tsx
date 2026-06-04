@@ -207,9 +207,7 @@ export default function AutomationsPage() {
 
             const response = await fetch('/api/automations/rules', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     shopDomain: activeShopDomain,
                     ruleKey: rule.ruleKey,
