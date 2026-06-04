@@ -8,13 +8,10 @@ export const runtime = 'nodejs';
 export async function GET(request: Request) {
   try {
     const shopDomain = extractShopDomain(request);
-    const billing = await getMerchantBilling(shopDomain);
+    const billing = await getMerchantBilling(shopDomain, { reconcileUsage: true });
     return NextResponse.json({
       ok: true,
-      billing: {
-        ...billing,
-        impressionsRemaining: Math.max(0, billing.impressionLimit - billing.impressionsUsed),
-      },
+      billing,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to load billing status.';

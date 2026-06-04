@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 
 import { useAutomationsOverview } from '@/hooks/queries/use-app-queries';
+import { useImpressionLimit } from '@/hooks/use-impression-limit';
 import { useShopDomain } from '@/hooks/use-shop-domain';
 import { queryKeys } from '@/lib/client/query-keys';
 import { Badge } from '@/components/ui/badge';
@@ -150,6 +151,7 @@ const getActionButtonClassName = (enabled: boolean) =>
 
 export default function AutomationsPage() {
     const activeShopDomain = useShopDomain();
+    const { atLimit } = useImpressionLimit();
     const queryClient = useQueryClient();
     const { data, isLoading, isFetching, isError, error: queryError } = useAutomationsOverview();
     const [savingRuleKey, setSavingRuleKey] = useState<RuleKey | null>(null);
@@ -193,6 +195,11 @@ export default function AutomationsPage() {
             }
 
             const nextEnabled = !rule.enabled;
+            if (nextEnabled && atLimit) {
+                setError('Monthly impression limit reached. Upgrade your plan on Plans to activate automations.');
+                return;
+            }
+
             const cacheKey = queryKeys.automationsOverview(activeShopDomain);
             const previous = queryClient.getQueryData<{ rules?: AutomationRule[] }>(cacheKey);
 
@@ -344,7 +351,15 @@ export default function AutomationsPage() {
                                                       size="sm"
                                                       className={getActionButtonClassName(rule.enabled)}
                                                       onClick={() => handleToggleStatus(rule)}
-                                                      disabled={savingRuleKey === rule.ruleKey}
+                                                      disabled={
+                                                          savingRuleKey === rule.ruleKey ||
+                                                          (!rule.enabled && atLimit)
+                                                      }
+                                                      title={
+                                                          !rule.enabled && atLimit
+                                                              ? 'Monthly impression limit reached.'
+                                                              : undefined
+                                                      }
                                                   >
                                                       {savingRuleKey === rule.ruleKey ? 'Saving...' : rule.enabled ? 'Deactivate' : 'Activate'}
                                                   </Button>

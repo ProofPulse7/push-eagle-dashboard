@@ -19,6 +19,7 @@ export type AppBootstrapPayload = {
   privacy: Record<string, unknown>;
   branding: Record<string, unknown>;
   optIn: Record<string, unknown>;
+  billing?: Record<string, unknown>;
 };
 
 export const hydrateAppCache = (
@@ -108,6 +109,13 @@ export const hydrateAppCache = (
     queryClient.setQueryData(queryKeys.analyticsStats(shopDomain, analyticsFrom, analyticsTo), {
       ok: true,
       ...payload.analyticsStats,
+    });
+  }
+
+  if (payload.billing) {
+    queryClient.setQueryData(queryKeys.billingStatus(shopDomain), {
+      ok: true,
+      billing: payload.billing,
     });
   }
 };

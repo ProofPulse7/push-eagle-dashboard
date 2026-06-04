@@ -38,7 +38,7 @@ export async function POST(request: Request) {
         shopifySubscriptionId: null,
         status: 'active',
       });
-      return NextResponse.json({ ok: true, activated: true, billing });
+      return NextResponse.json({ ok: true, activated: true, billing, confirmationUrl: null });
     }
 
     const tier = getBusinessTier(body.tierId || '');
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: 'Invalid business tier.' }, { status: 400 });
     }
 
-    await upsertMerchantBilling({
+    const billing = await upsertMerchantBilling({
       shopDomain,
       planKey: 'business',
       tierId: tier.id,
@@ -55,22 +55,35 @@ export async function POST(request: Request) {
       status: 'pending',
     });
 
-    const result = await callPushEagleBilling('/api/shopify/billing/create', shopDomain, {
-      planName: `Push Eagle Business (${tier.impressions.toLocaleString()} impressions)`,
-      priceUsd: tier.priceUsd,
-      returnUrl: returnUrl.toString(),
-      test: process.env.SHOPIFY_BILLING_TEST === 'true',
-    });
+    let result: Record<string, unknown>;
+    try {
+      result = await callPushEagleBilling('/api/shopify/billing/create', shopDomain, {
+        planName: `Push Eagle Business (${tier.impressions.toLocaleString()} impressions)`,
+        priceUsd: tier.priceUsd,
+        returnUrl: returnUrl.toString(),
+        test: process.env.SHOPIFY_BILLING_TEST === 'true',
+      });
+    } catch (billingError) {
+      const message =
+        billingError instanceof Error
+          ? billingError.message
+          : 'Could not connect to Shopify billing. Open the app from Shopify admin and ensure push-eagle is deployed.';
+      return NextResponse.json({ ok: false, error: message, billing }, { status: 502 });
+    }
 
     const confirmationUrl = String(result.confirmationUrl || '');
     if (!confirmationUrl) {
-      return NextResponse.json({ ok: false, error: 'Missing Shopify confirmation URL.' }, { status: 502 });
+      return NextResponse.json(
+        { ok: false, error: 'Missing Shopify confirmation URL.', billing },
+        { status: 502 },
+      );
     }
 
     return NextResponse.json({
       ok: true,
       confirmationUrl,
       subscriptionId: result.subscriptionId ?? null,
+      billing,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to start subscription.';

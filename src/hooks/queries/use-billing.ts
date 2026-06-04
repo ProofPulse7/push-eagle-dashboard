@@ -3,19 +3,17 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { fetchJson, fetchJsonWithShop } from '@/lib/client/api-fetch';
+import { queryKeys } from '@/lib/client/query-keys';
 import { useShopDomain } from '@/hooks/use-shop-domain';
 
-export const billingKeys = {
-  status: (shop: string) => ['pe', shop, 'billing', 'status'] as const,
-};
-
-export function useBillingStatus() {
+export function useBillingStatus(options?: { refetchOnMount?: boolean }) {
   const shop = useShopDomain();
   return useQuery({
-    queryKey: billingKeys.status(shop),
+    queryKey: queryKeys.billingStatus(shop),
     queryFn: () => fetchJsonWithShop<{ billing: Record<string, unknown> }>('/api/billing/status', shop),
     enabled: Boolean(shop),
     staleTime: 5 * 60 * 1000,
+    refetchOnMount: options?.refetchOnMount ? 'always' : true,
     placeholderData: (previous) => previous,
   });
 }
@@ -32,7 +30,7 @@ export function useSubscribePlan() {
         body: JSON.stringify({ shopDomain: shop, ...body }),
       }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: billingKeys.status(shop) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.billingStatus(shop) });
     },
   });
 }
@@ -49,7 +47,7 @@ export function useConfirmBilling() {
         body: JSON.stringify({ shopDomain: shop }),
       }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: billingKeys.status(shop) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.billingStatus(shop) });
     },
   });
 }

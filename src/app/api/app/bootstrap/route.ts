@@ -15,6 +15,7 @@ import {
   listCampaigns,
   listSegments,
 } from '@/lib/server/data/store';
+import { getMerchantBillingFast } from '@/lib/server/billing/merchant-billing';
 import { extractShopDomain } from '@/lib/server/shop-context';
 
 export const runtime = 'nodejs';
@@ -43,6 +44,7 @@ export async function GET(request: Request) {
       privacy,
       branding,
       optIn,
+      billing,
     ] = await Promise.all([
       getMerchantOverview(shopDomain),
       getCampaignStats(shopDomain),
@@ -57,6 +59,7 @@ export async function GET(request: Request) {
       getPrivacySettings(shopDomain),
       getBrandingSettings(shopDomain),
       getOptInSettings(shopDomain),
+      getMerchantBillingFast(shopDomain),
     ]);
 
     const subscriberOverview = {
@@ -86,6 +89,7 @@ export async function GET(request: Request) {
         privacy,
         branding,
         optIn,
+        billing,
       },
       { headers: CACHE_HEADERS },
     );

@@ -13,6 +13,7 @@ import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useDashboardSummary } from '@/hooks/queries/use-app-queries';
+import { useImpressionLimit } from '@/hooks/use-impression-limit';
 import { useShopDomain } from '@/hooks/use-shop-domain';
 import { formatCurrency } from '@/lib/utils';
 
@@ -28,6 +29,7 @@ const proPlanFeatures = [
 
 export function DashboardView() {
   const shopDomain = useShopDomain();
+  const { atLimit } = useImpressionLimit();
   const { data, isLoading, isFetching, error, isError } = useDashboardSummary();
 
   if (!shopDomain) {
@@ -95,10 +97,10 @@ export function DashboardView() {
           <Button variant="outline" asChild>
             <Link href="/campaigns">View Campaigns</Link>
           </Button>
-          <Button asChild>
-            <Link href="/campaigns/new">
+          <Button asChild disabled={atLimit} title={atLimit ? 'Monthly impression limit reached. Upgrade on Plans.' : undefined}>
+            <Link href={atLimit ? '/plans' : '/campaigns/new'}>
               <Send className="mr-2 h-4 w-4" />
-              Create Campaign
+              {atLimit ? 'Upgrade to send' : 'Create Campaign'}
             </Link>
           </Button>
         </div>

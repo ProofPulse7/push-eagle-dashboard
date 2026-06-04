@@ -11,9 +11,11 @@ import { CampaignStats } from '@/components/campaigns/campaign-stats';
 import { DateRangePicker } from '@/components/analytics/date-range-picker';
 import { PageLoadingShell } from '@/components/ui/loading-ui';
 import { useCampaigns } from '@/hooks/queries/use-app-queries';
+import { useImpressionLimit } from '@/hooks/use-impression-limit';
 
 export default function CampaignsPage() {
   const [date, setDate] = useState<DateRange | undefined>(undefined);
+  const { atLimit } = useImpressionLimit();
   const { data, isLoading, isFetching } = useCampaigns();
 
   return (
@@ -29,10 +31,10 @@ export default function CampaignsPage() {
           <h1 className="text-2xl font-bold tracking-tight md:text-3xl">Campaigns</h1>
           <p className="text-muted-foreground">View and manage your past and current campaigns.</p>
         </div>
-        <Button asChild>
-          <Link href="/campaigns/new">
+        <Button asChild disabled={atLimit} title={atLimit ? 'Monthly impression limit reached.' : undefined}>
+          <Link href={atLimit ? '/plans' : '/campaigns/new'}>
             <PlusCircle className="mr-2 h-4 w-4" />
-            New Campaign
+            {atLimit ? 'Upgrade to send' : 'New Campaign'}
           </Link>
         </Button>
       </div>
