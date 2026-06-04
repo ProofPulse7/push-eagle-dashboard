@@ -9,7 +9,6 @@ import { FirebaseClientInit } from '@/components/firebase/firebase-client-init';
 import { SettingsProvider } from '@/context/settings-context';
 import { AppBootstrapLoader } from '@/components/providers/app-bootstrap-loader';
 import { AppSetupGate } from '@/components/providers/app-setup-gate';
-import { GlobalLoadingProvider } from '@/components/providers/global-loading-provider';
 import { QueryProvider } from '@/components/providers/query-provider';
 import { SettingsCacheSync } from '@/components/providers/settings-cache-sync';
 
@@ -56,16 +55,14 @@ export default function RootLayout({
         >
           <QueryProvider>
             <SettingsProvider>
-              <GlobalLoadingProvider>
-                <AppSetupGate>
-                  <AppBootstrapLoader>
-                    <SettingsCacheSync />
-                    <FirebaseClientInit />
-                    <AppLayout>{children}</AppLayout>
-                    <Toaster />
-                  </AppBootstrapLoader>
-                </AppSetupGate>
-              </GlobalLoadingProvider>
+              <AppSetupGate>
+                <AppBootstrapLoader>
+                  <SettingsCacheSync />
+                  <FirebaseClientInit />
+                  <AppLayout>{children}</AppLayout>
+                  <Toaster />
+                </AppBootstrapLoader>
+              </AppSetupGate>
             </SettingsProvider>
           </QueryProvider>
         </ThemeProvider>

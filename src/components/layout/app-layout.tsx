@@ -22,7 +22,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen w-full">
       <Sidebar />
       <div className="flex flex-col md:pl-64">
-        <main className="flex-grow">{children}</main>
+        <main className="flex-grow pe-page-enter">{children}</main>
       </div>
     </div>
   );

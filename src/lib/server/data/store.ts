@@ -6696,6 +6696,9 @@ export const sendCampaign = async (
   campaignId: string,
   options?: { maxBatches?: number },
 ) => {
+  const { assertCanSendNotifications } = await import('@/lib/server/billing/merchant-billing');
+  await assertCanSendNotifications(shopDomain, 1);
+
   await ensureSchema();
   const sql = getNeonSql();
   const maxBatches = Math.max(1, Math.min(Number(options?.maxBatches ?? Number.MAX_SAFE_INTEGER), 2000));

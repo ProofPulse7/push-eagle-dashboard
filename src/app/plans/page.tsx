@@ -1,212 +1,268 @@
 
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Slider } from '@/components/ui/slider';
-import { Check, Info, Mail, MessageSquare } from 'lucide-react';
+import { Check, Info, Loader2, Mail } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import Image from 'next/image';
+import { PageLoadingShell } from '@/components/ui/loading-ui';
+import { BUSINESS_TIERS, BASIC_PLAN } from '@/lib/client/billing-plans';
+import { useBillingStatus, useConfirmBilling, useSubscribePlan } from '@/hooks/queries/use-billing';
+import { useToast } from '@/hooks/use-toast';
 
-const businessTiers = [
-    { impressions: 10000, price: 8 },
-    { impressions: 20000, price: 15 },
-    { impressions: 30000, price: 21 },
-    { impressions: 50000, price: 32 },
+const BUSINESS_FEATURES = [
+  'All Basic features',
+  'All automations',
+  'Campaigns & scheduling',
+  'Analytics & attribution',
+  'Segments',
+  'Smart delivery',
 ];
 
-const enterpriseTiers = [
-    { impressions: 50000, price: 50 },
-    { impressions: 75000, price: 70 },
-    { impressions: 100000, price: 90 },
-    { impressions: 150000, price: 125 },
-    { impressions: 250000, price: 190 },
-    { impressions: 350000, price: 250 },
-    { impressions: 500000, price: 350 },
-    { impressions: 1000000, price: 650 },
-    { impressions: 1500000, price: 900 },
-    { impressions: 2000000, price: 1100 },
-    { impressions: 2500000, price: 1350 },
-    { impressions: 3000000, price: 1550 },
-    { impressions: 3500000, price: 1750 },
-    { impressions: 4000000, price: 1950 },
-    { impressions: 4500000, price: 2100 },
-    { impressions: 5000000, price: 2250 },
+const BASIC_FEATURES = [
+  '10,000 impressions / month',
+  'Unlimited subscribers',
+  'Campaigns & scheduling',
+  'All automations',
+  'Analytics',
+  'Chat support',
 ];
-
-
-const PlanCard = ({ plan, onSelectPlan, selectedPlan }: {
-    plan: {
-        name: string;
-        tiers: { impressions: number; price: number }[];
-        features: string[];
-    };
-    onSelectPlan: (planName: string, tierIndex: number) => void;
-    selectedPlan: { name: string; tierIndex: number };
-}) => {
-    const isCurrent = plan.name === selectedPlan.name;
-    const [selectedTierIndex, setSelectedTierIndex] = useState(isCurrent ? selectedPlan.tierIndex : 0);
-
-    const tier = plan.tiers[selectedTierIndex];
-
-    const handleSliderChange = (value: number[]) => {
-        setSelectedTierIndex(value[0]);
-    };
-    
-    return (
-        <Card className={cn("flex flex-col", isCurrent ? 'border-primary ring-2 ring-primary' : '')}>
-            <CardHeader className={cn("rounded-t-lg text-white", isCurrent ? "bg-primary" : "bg-gray-800")}>
-                <CardTitle className="text-center text-xl">{plan.name}</CardTitle>
-            </CardHeader>
-            <CardContent className="flex-grow pt-8">
-                <div className="text-center space-y-4">
-                    <p className="text-5xl font-bold">
-                        ${tier.price}
-                        <span className="text-lg font-normal text-muted-foreground">/mo</span>
-                    </p>
-                    <div className="space-y-4 pt-4">
-                        {plan.tiers.length > 1 ? (
-                            <Slider
-                                defaultValue={[selectedTierIndex]}
-                                max={plan.tiers.length - 1}
-                                step={1}
-                                onValueChange={handleSliderChange}
-                            />
-                        ) : null}
-                        <div className="flex justify-center items-center gap-2">
-                             <p className="text-lg font-semibold text-foreground">{tier.impressions.toLocaleString()}</p>
-                            <p className="text-muted-foreground">Impressions per month</p>
-                            <Info className="w-4 h-4 text-muted-foreground" />
-                        </div>
-                    </div>
-                </div>
-
-                <ul className="mt-8 space-y-3 text-sm">
-                    {plan.features.map(feature => (
-                        <li key={feature} className="flex items-center gap-3">
-                            <Check className="w-5 h-5 text-green-500" />
-                            <span className="text-muted-foreground">{feature}</span>
-                        </li>
-                    ))}
-                </ul>
-            </CardContent>
-            <CardFooter className="flex-col gap-4 pt-6 mt-auto">
-                {isCurrent && (
-                    <div className="w-full bg-muted/50 p-3 rounded-lg text-center text-sm mb-2">
-                        <p className="font-bold">CURRENT PLAN</p>
-                        <p className="text-muted-foreground">Impressions per calendar month ({tier.impressions.toLocaleString()})</p>
-                        <p className="text-muted-foreground text-xs">Your impression limit resets on 8/1/2025, 5:00:00 AM</p>
-                    </div>
-                )}
-                <Button 
-                    size="lg" 
-                    className={cn("w-full", isCurrent && "bg-gray-300 text-gray-500 hover:bg-gray-300 cursor-not-allowed")} 
-                    disabled={isCurrent}
-                    onClick={() => onSelectPlan(plan.name, selectedTierIndex)}
-                >
-                    {isCurrent ? "Current Plan" : "Select"}
-                </Button>
-            </CardFooter>
-        </Card>
-    );
-};
-
 
 export default function PlansPage() {
-    const [selectedPlan, setSelectedPlan] = useState({ name: 'Basic', tierIndex: 0 });
+  const { toast } = useToast();
+  const searchParams = useSearchParams();
+  const { data, isLoading, isFetching } = useBillingStatus();
+  const subscribe = useSubscribePlan();
+  const confirmBilling = useConfirmBilling();
+  const [tierIndex, setTierIndex] = useState(0);
 
-    const plans = [
-        {
-            name: "Basic",
-            tiers: [{ impressions: 500, price: 0 }],
-            features: [
-                "Unlimited Subscribers",
-                "Send Campaigns",
-                "Schedule Campaigns",
-                "Duplicate Campaigns",
-                "Basic Reports",
-                "Chat Support",
-            ],
-        },
-        {
-            name: "Business",
-            tiers: businessTiers,
-            features: [
-                "All Basic Features",
-                "Abandoned Cart Automation",
-                "Hero Image Support",
-                "Email Reports",
-            ],
-        },
-        {
-            name: "Enterprise",
-            tiers: enterpriseTiers,
-            features: [
-                "All Business Features",
-                "Segmentation",
-                "Flash Sale",
-                "Smart Delivery",
-                "Checkout Recovery",
-                "Custom Attribution Window",
-                "Subscriber Details",
-                "Shipping Notification",
-            ],
-        },
-    ];
-    
-    const handleSelectPlan = (planName: string, tierIndex: number) => {
-        setSelectedPlan({ name: planName, tierIndex });
-    };
+  const billing = (data?.billing ?? null) as Record<string, unknown> | null;
+  const currentPlanKey = String(billing?.planKey ?? 'basic');
+  const currentTierId = billing?.tierId ? String(billing.tierId) : null;
+  const impressionsUsed = Number(billing?.impressionsUsed ?? 0);
+  const impressionLimit = Number(billing?.impressionLimit ?? BASIC_PLAN.impressions);
+  const periodEnd = billing?.periodEnd ? new Date(String(billing.periodEnd)) : null;
 
-    return (
-    <div className="p-4 sm:p-6 md:p-8 flex flex-col gap-8">
-       <div className="bg-card rounded-lg shadow-sm p-4 flex justify-between items-center relative overflow-hidden">
-            <div>
-                 <h1 className="text-xl font-bold flex items-center gap-2">
-                    Pricing 🤑
-                </h1>
-            </div>
-            <div className="absolute -right-20 -top-10 opacity-10">
-                 <Image 
-                    src="https://cdn.jsdelivr.net/gh/firebounty/sw-assests@main/pricing-banner.png" 
-                    alt="Decorative banner"
-                    width={400}
-                    height={150}
-                    className="w-auto h-auto"
-                />
-            </div>
+  const selectedTier = BUSINESS_TIERS[tierIndex] ?? BUSINESS_TIERS[0];
+
+  useEffect(() => {
+    if (currentTierId) {
+      const index = BUSINESS_TIERS.findIndex((tier) => tier.id === currentTierId);
+      if (index >= 0) {
+        setTierIndex(index);
+      }
+    }
+  }, [currentTierId]);
+
+  const billingReturnHandled = useRef(false);
+  useEffect(() => {
+    if (searchParams.get('billing') !== 'return' || billingReturnHandled.current) {
+      return;
+    }
+    billingReturnHandled.current = true;
+    confirmBilling.mutate(undefined, {
+      onSuccess: (result) => {
+        if (result?.activated) {
+          toast({ title: 'Plan activated', description: 'Your Business plan is now active.' });
+        }
+      },
+      onError: () => {
+        toast({
+          variant: 'destructive',
+          title: 'Billing confirmation pending',
+          description: 'Complete approval in Shopify if you have not already.',
+        });
+      },
+    });
+  }, [searchParams, confirmBilling, toast]);
+
+  const resetLabel = useMemo(() => {
+    if (!periodEnd) {
+      return 'Resets on the 1st of each month';
+    }
+    return `Resets ${periodEnd.toLocaleString()}`;
+  }, [periodEnd]);
+
+  const handleSubscribeBasic = () => {
+    subscribe.mutate(
+      { planKey: 'basic' },
+      {
+        onSuccess: () => {
+          toast({ title: 'Basic plan active', description: 'You are on the free Basic plan.' });
+        },
+        onError: (error) => {
+          toast({
+            variant: 'destructive',
+            title: 'Could not activate Basic',
+            description: error instanceof Error ? error.message : 'Try again.',
+          });
+        },
+      },
+    );
+  };
+
+  const handleSubscribeBusiness = () => {
+    subscribe.mutate(
+      { planKey: 'business', tierId: selectedTier.id },
+      {
+        onSuccess: (result) => {
+          if (result?.confirmationUrl) {
+            window.top?.location.assign(result.confirmationUrl);
+            return;
+          }
+          toast({ title: 'Business plan active', description: 'Your plan is ready to use.' });
+        },
+        onError: (error) => {
+          toast({
+            variant: 'destructive',
+            title: 'Could not start checkout',
+            description: error instanceof Error ? error.message : 'Try again.',
+          });
+        },
+      },
+    );
+  };
+
+  const usagePercent = impressionLimit > 0 ? Math.min(100, (impressionsUsed / impressionLimit) * 100) : 0;
+
+  return (
+    <PageLoadingShell
+      title="Plans"
+      isLoading={isLoading}
+      hasData={Boolean(data)}
+      isFetching={isFetching}
+    >
+      <div className="p-4 sm:p-6 md:p-8 flex flex-col gap-8 pe-page-enter">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight md:text-3xl">Plans</h1>
+          <p className="text-muted-foreground mt-1">
+            Impressions include manual campaigns and automation sends. {resetLabel}.
+          </p>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-stretch">
-            {plans.map(plan => (
-                <PlanCard 
-                    key={plan.name}
-                    plan={plan}
-                    onSelectPlan={handleSelectPlan}
-                    selectedPlan={selectedPlan}
-                />
-            ))}
-        </div>
-
-        <Card className="flex flex-col md:flex-row items-center justify-between gap-6 p-8">
-            <div className="space-y-2">
-                <CardTitle className="text-2xl">Custom Enterprise</CardTitle>
-                <CardDescription>
-                    For large-scale businesses with custom needs. Get a personalized package.
-                </CardDescription>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">This month&apos;s usage</CardTitle>
+            <CardDescription>
+              {impressionsUsed.toLocaleString()} / {impressionLimit.toLocaleString()} impressions
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+              <div className="h-full bg-primary transition-all duration-300" style={{ width: `${usagePercent}%` }} />
             </div>
-            <div className="flex flex-col sm:flex-row gap-4">
-                <Button size="lg" variant="outline">
-                    <Mail className="mr-2 h-5 w-5" />
-                    Contact us via Email
-                </Button>
-                <Button size="lg">
-                    <MessageSquare className="mr-2 h-5 w-5" />
-                    Chat with us
-                </Button>
-            </div>
+          </CardContent>
         </Card>
-    </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch">
+          <Card className={cn('flex flex-col pe-pressable', currentPlanKey === 'basic' && 'border-primary ring-2 ring-primary/30')}>
+            <CardHeader className="bg-muted/40">
+              <CardTitle>Basic</CardTitle>
+              <CardDescription>Free — perfect to get started</CardDescription>
+            </CardHeader>
+            <CardContent className="flex-grow pt-6 space-y-4">
+              <p className="text-4xl font-bold">
+                $0<span className="text-base font-normal text-muted-foreground">/mo</span>
+              </p>
+              <p className="text-sm text-muted-foreground flex items-center gap-2">
+                <Info className="h-4 w-4" />
+                {BASIC_PLAN.impressions.toLocaleString()} impressions per month
+              </p>
+              <ul className="space-y-2 text-sm">
+                {BASIC_FEATURES.map((feature) => (
+                  <li key={feature} className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-green-500" />
+                    <span>{feature}</span>
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+            <CardFooter>
+              <Button
+                className="w-full pe-pressable"
+                variant={currentPlanKey === 'basic' ? 'secondary' : 'default'}
+                disabled={currentPlanKey === 'basic' || subscribe.isPending}
+                onClick={handleSubscribeBasic}
+              >
+                {currentPlanKey === 'basic' ? 'Current plan' : subscribe.isPending ? 'Processing…' : 'Subscribe free'}
+              </Button>
+            </CardFooter>
+          </Card>
+
+          <Card className={cn('flex flex-col pe-pressable', currentPlanKey === 'business' && 'border-primary ring-2 ring-primary/30')}>
+            <CardHeader className="bg-primary text-primary-foreground rounded-t-lg">
+              <CardTitle>Business</CardTitle>
+              <CardDescription className="text-primary-foreground/80">
+                Scale with higher monthly impression limits
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex-grow pt-6 space-y-5">
+              <p className="text-4xl font-bold">
+                ${selectedTier.priceUsd}
+                <span className="text-base font-normal text-muted-foreground">/mo</span>
+              </p>
+              <Slider
+                value={[tierIndex]}
+                max={BUSINESS_TIERS.length - 1}
+                step={1}
+                onValueChange={(value) => setTierIndex(value[0] ?? 0)}
+              />
+              <p className="text-sm font-medium flex items-center gap-2">
+                {selectedTier.impressions.toLocaleString()} impressions / month
+              </p>
+              <ul className="space-y-2 text-sm">
+                {BUSINESS_FEATURES.map((feature) => (
+                  <li key={feature} className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-green-500" />
+                    <span>{feature}</span>
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+            <CardFooter>
+              <Button
+                className="w-full pe-pressable"
+                disabled={
+                  (currentPlanKey === 'business' && currentTierId === selectedTier.id) ||
+                  subscribe.isPending
+                }
+                onClick={handleSubscribeBusiness}
+              >
+                {subscribe.isPending ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Redirecting to Shopify…
+                  </>
+                ) : currentPlanKey === 'business' && currentTierId === selectedTier.id ? (
+                  'Current plan'
+                ) : (
+                  'Subscribe'
+                )}
+              </Button>
+            </CardFooter>
+          </Card>
+        </div>
+
+        <Card className="pe-pressable">
+          <CardContent className="flex flex-col md:flex-row items-center justify-between gap-6 p-8">
+            <div className="space-y-2">
+              <CardTitle className="text-2xl">Custom Enterprise</CardTitle>
+              <CardDescription>
+                Need more than 1M impressions or custom terms? Contact us for custom pricing.
+              </CardDescription>
+            </div>
+            <Button size="lg" variant="outline" className="pe-pressable" asChild>
+              <a href="mailto:support@push-eagle.com">
+                <Mail className="mr-2 h-5 w-5" />
+                Contact for custom pricing
+              </a>
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    </PageLoadingShell>
   );
 }

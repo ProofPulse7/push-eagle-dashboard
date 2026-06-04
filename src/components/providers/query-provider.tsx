@@ -5,7 +5,7 @@ import { QueryClient } from '@tanstack/react-query';
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
 import { createSyncStoragePersister } from '@tanstack/query-sync-storage-persister';
 
-const STALE_TIME_MS = 3 * 60 * 1000;
+const STALE_TIME_MS = 10 * 60 * 1000;
 const GC_TIME_MS = 60 * 60 * 1000;
 
 function makeQueryClient() {
@@ -14,9 +14,10 @@ function makeQueryClient() {
       queries: {
         staleTime: STALE_TIME_MS,
         gcTime: GC_TIME_MS,
-        refetchOnWindowFocus: true,
+        refetchOnWindowFocus: false,
         refetchOnReconnect: true,
         retry: 1,
+        placeholderData: (previous: unknown) => previous,
       },
       mutations: {
         retry: 0,
