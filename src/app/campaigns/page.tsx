@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import type { DateRange } from 'react-day-picker';
 import Link from 'next/link';
 import { PlusCircle } from 'lucide-react';
@@ -9,11 +9,20 @@ import { Button } from '@/components/ui/button';
 import { CampaignsTable } from '@/components/campaigns/campaigns-table';
 import { CampaignStats } from '@/components/campaigns/campaign-stats';
 import { DateRangePicker } from '@/components/analytics/date-range-picker';
+import { PageLoadingShell } from '@/components/ui/loading-ui';
+import { useCampaigns } from '@/hooks/queries/use-app-queries';
 
 export default function CampaignsPage() {
   const [date, setDate] = useState<DateRange | undefined>(undefined);
+  const { data, isLoading, isFetching } = useCampaigns();
 
   return (
+    <PageLoadingShell
+      title="Campaigns"
+      isLoading={isLoading}
+      hasData={Boolean(data)}
+      isFetching={isFetching}
+    >
     <div className="p-4 sm:p-6 md:p-8 flex flex-col gap-8">
       <div className="flex items-center justify-between">
         <div>
@@ -38,5 +47,6 @@ export default function CampaignsPage() {
 
       <CampaignsTable dateRange={date} />
     </div>
+    </PageLoadingShell>
   );
 }

@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   useMerchantOverview,
@@ -10,7 +10,10 @@ import {
   useSaveBrandingSettings,
   useSavePrivacySettings,
 } from '@/hooks/queries/use-app-queries';
+import { useDebouncedCallback } from '@/hooks/use-debounced-callback';
 import { queryKeys } from '@/lib/client/query-keys';
+import { mergePendingSettings, writePendingSettings } from '@/lib/client/pending-settings';
+import { PageLoadingShell } from '@/components/ui/loading-ui';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -130,26 +133,147 @@ export default function SettingsPage() {
         };
     }, [overviewData, shopDomain]);
 
+    const activeShopDomain = shopDomain || overview?.myshopifyDomain || '';
+
+    const buildPrivacyBody = useCallback(
+        () => ({
+            allowSupport,
+            ipAddressOption,
+            enableGeo,
+            enablePreferences,
+            emailStoreOption,
+            locationStoreOption,
+            nameStoreOption,
+        }),
+        [
+            allowSupport,
+            emailStoreOption,
+            enableGeo,
+            enablePreferences,
+            ipAddressOption,
+            locationStoreOption,
+            nameStoreOption,
+        ],
+    );
+
+    type PrivacyBody = ReturnType<typeof buildPrivacyBody>;
+
+    const flushPrivacySave = useDebouncedCallback((body: PrivacyBody) => {
+        if (!activeShopDomain) {
+            return;
+        }
+        writePendingSettings(activeShopDomain, 'privacy', body);
+        queryClient.setQueryData(queryKeys.privacy(activeShopDomain), {
+            ok: true,
+            shopDomain: activeShopDomain,
+            ...body,
+        });
+        savePrivacyMutation.mutate(body);
+    }, 450);
+
+    const applyPrivacyPatch = useCallback(
+        (patch: Partial<PrivacyBody>) => {
+            const next: PrivacyBody = {
+                allowSupport: patch.allowSupport ?? allowSupport,
+                ipAddressOption: patch.ipAddressOption ?? ipAddressOption,
+                enableGeo: patch.enableGeo ?? enableGeo,
+                enablePreferences: patch.enablePreferences ?? enablePreferences,
+                emailStoreOption: patch.emailStoreOption ?? emailStoreOption,
+                locationStoreOption: patch.locationStoreOption ?? locationStoreOption,
+                nameStoreOption: patch.nameStoreOption ?? nameStoreOption,
+            };
+            setAllowSupport(next.allowSupport);
+            setIpAddressOption(next.ipAddressOption);
+            setEnableGeo(next.enableGeo);
+            setEnablePreferences(next.enablePreferences);
+            setEmailStoreOption(next.emailStoreOption);
+            setLocationStoreOption(next.locationStoreOption);
+            setNameStoreOption(next.nameStoreOption);
+            flushPrivacySave(next);
+        },
+        [
+            allowSupport,
+            emailStoreOption,
+            enableGeo,
+            enablePreferences,
+            flushPrivacySave,
+            ipAddressOption,
+            locationStoreOption,
+            nameStoreOption,
+        ],
+    );
+
     useEffect(() => {
-        if (!privacyData?.ok) {
+        if (!activeShopDomain) {
             return;
         }
 
-        setAllowSupport(Boolean(privacyData.allowSupport));
+        const merged = mergePendingSettings(activeShopDomain, 'privacy', privacyData);
+        setAllowSupport(Boolean(merged.allowSupport ?? true));
         setIpAddressOption(
-            String(privacyData.ipAddressOption || 'anonymized') as 'anonymized' | 'no-ip',
+            String(merged.ipAddressOption || 'anonymized') as 'anonymized' | 'no-ip',
         );
-        setEnableGeo(Boolean(privacyData.enableGeo));
-        setEnablePreferences(Boolean(privacyData.enablePreferences));
+        setEnableGeo(Boolean(merged.enableGeo ?? true));
+        setEnablePreferences(Boolean(merged.enablePreferences ?? false));
         setEmailStoreOption(
-            String(privacyData.emailStoreOption || 'full-email') as
-                | 'full-email'
-                | 'hash-email'
-                | 'no-email',
+            String(merged.emailStoreOption || 'full-email') as 'full-email' | 'hash-email' | 'no-email',
         );
-        setLocationStoreOption(String(privacyData.locationStoreOption || 'yes') as 'yes' | 'no');
-        setNameStoreOption(String(privacyData.nameStoreOption || 'yes') as 'yes' | 'no');
-    }, [privacyData]);
+        setLocationStoreOption(String(merged.locationStoreOption || 'yes') as 'yes' | 'no');
+        setNameStoreOption(String(merged.nameStoreOption || 'yes') as 'yes' | 'no');
+    }, [activeShopDomain, privacyData]);
+
+    const flushAttributionSave = useDebouncedCallback(
+        (body: {
+            attributionModel: 'click' | 'impression';
+            attributionCreditMode: 'last_touch' | 'all_touches';
+            clickWindowDays: number;
+            impressionWindowDays: number;
+        }) => {
+            if (!activeShopDomain) {
+                return;
+            }
+            writePendingSettings(activeShopDomain, 'attribution', body);
+            queryClient.setQueryData(queryKeys.attribution(activeShopDomain), {
+                ok: true,
+                shopDomain: activeShopDomain,
+                ...body,
+            });
+            saveAttributionMutation.mutate(body);
+        },
+        450,
+    );
+
+    const applyAttributionPatch = useCallback(
+        (patch: {
+            attributionModel?: 'click' | 'impression';
+            attributionCreditMode?: 'last_touch' | 'all_touches';
+            clickWindowDays?: number;
+            impressionWindowDays?: number;
+        }) => {
+            const next = {
+                attributionModel: patch.attributionModel ?? attributionModel,
+                attributionCreditMode: patch.attributionCreditMode ?? attributionCreditMode,
+                clickWindowDays: patch.clickWindowDays ?? clickWindowDays,
+                impressionWindowDays: patch.impressionWindowDays ?? impressionWindowDays,
+            };
+            setAttributionModel(next.attributionModel);
+            setAttributionCreditMode(next.attributionCreditMode);
+            setClickWindowDays(next.clickWindowDays);
+            setImpressionWindowDays(next.impressionWindowDays);
+            flushAttributionSave(next);
+        },
+        [
+            attributionCreditMode,
+            attributionModel,
+            clickWindowDays,
+            flushAttributionSave,
+            impressionWindowDays,
+            setAttributionCreditMode,
+            setAttributionModel,
+            setClickWindowDays,
+            setImpressionWindowDays,
+        ],
+    );
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -254,8 +378,6 @@ export default function SettingsPage() {
         }
     };
 
-    const activeShopDomain = shopDomain || overview?.myshopifyDomain || '';
-
     const saveBrandingSettings = () => {
         if (!activeShopDomain) {
             toast({
@@ -323,7 +445,16 @@ export default function SettingsPage() {
     };
 
 
+  const settingsLoading = !overviewData && !privacyData;
+  const settingsHasData = Boolean(overviewData || privacyData);
+
   return (
+    <PageLoadingShell
+      title="Settings"
+      isLoading={settingsLoading}
+      hasData={settingsHasData}
+      isFetching={savePrivacyMutation.isPending || saveAttributionMutation.isPending}
+    >
     <div className="flex flex-col gap-8">
         {/* Header Banner */}
         <div className="bg-card p-6 rounded-b-lg relative overflow-hidden">
@@ -487,7 +618,7 @@ export default function SettingsPage() {
                         <CardContent>
                             <SettingsSection title="LIMITED ACCESS" description="PushEagle uses third-party integrations and tools to offer better support to our users. These tools help our team diagnose and fix issues faced by you. You can choose to disable this feature if you don't need access to support and/or critical updates regarding your store.">
                                  <div className="flex items-start gap-3 p-3 rounded-md bg-background/50 border">
-                                    <Checkbox id="allow-support" checked={allowSupport} onCheckedChange={(checked) => setAllowSupport(!!checked)} className="mt-1" />
+                                    <Checkbox id="allow-support" checked={allowSupport} onCheckedChange={(checked) => applyPrivacyPatch({ allowSupport: !!checked })} className="mt-1" />
                                     <div className="grid gap-1.5 leading-none w-full">
                                         <Label htmlFor="allow-support" className="font-medium cursor-pointer">
                                             Allow PushEagle to use support tools
@@ -507,7 +638,7 @@ export default function SettingsPage() {
                         <CardHeader><CardTitle>Subscriber</CardTitle></CardHeader>
                         <CardContent>
                              <SettingsSection title="IP ADDRESS" description="Choose whether or not you want to collect and store the anonymized IP addresses (classified as personal data under GDPR) of your subscribers. By storing the last octet of the IP address, the subscriber is anonymized to a sufficient degree, ensuring your GDPR compliance.">
-                                <RadioGroup value={ipAddressOption} onValueChange={(value) => setIpAddressOption(value as 'anonymized' | 'no-ip')} className="space-y-2">
+                                <RadioGroup value={ipAddressOption} onValueChange={(value) => applyPrivacyPatch({ ipAddressOption: value as 'anonymized' | 'no-ip' })} className="space-y-2">
                                     <div className="flex items-center gap-3 p-3 rounded-md bg-background/50 border">
                                         <RadioGroupItem value="anonymized" id="anonymized" />
                                         <Label htmlFor="anonymized" className="font-medium cursor-pointer w-full">
@@ -533,7 +664,7 @@ export default function SettingsPage() {
                             <Separator className="my-6" />
                              <SettingsSection title="GEO-LOCATION" description="By enabling geo-location, PushEagle will collect IP addresses in order to get the location information about your subscribers. As soon as the location data is collected, the IP address will be deleted instantly, leaving the subscriber as anonymous. Recommended.">
                                 <div className="flex items-start gap-3 p-3 rounded-md bg-background/50 border">
-                                    <Checkbox id="enable-geo" checked={enableGeo} onCheckedChange={(checked) => setEnableGeo(!!checked)} className="mt-1" />
+                                    <Checkbox id="enable-geo" checked={enableGeo} onCheckedChange={(checked) => applyPrivacyPatch({ enableGeo: !!checked })} className="mt-1" />
                                     <div className="grid gap-1.5 leading-none w-full">
                                         <Label htmlFor="enable-geo" className="font-medium cursor-pointer">
                                             Enable Geo Location
@@ -551,7 +682,7 @@ export default function SettingsPage() {
                              <SettingsSection title="NOTIFICATION PREFERENCES" description="You can choose to give your subscribers the option to access or delete their data, along with an option to unsubscribe from push notifications. Mark the check below for the notification preferences widget.">
                                 <div className="flex items-center gap-4 p-3 rounded-md bg-background/50 border">
                                     <Label htmlFor="notification-preferences">Enable notification preferences</Label>
-                                    <Switch id="notification-preferences" checked={enablePreferences} onCheckedChange={setEnablePreferences} />
+                                    <Switch id="notification-preferences" checked={enablePreferences} onCheckedChange={(checked) => applyPrivacyPatch({ enablePreferences: !!checked })} />
                                 </div>
                                 {!enablePreferences && (
                                     <WarningAlert>
@@ -565,7 +696,7 @@ export default function SettingsPage() {
                         <CardHeader><CardTitle>Store subscriber information</CardTitle></CardHeader>
                         <CardContent>
                             <SettingsSection title="EMAIL" description="Email of the subscriber is used by some third-party integrations to send push notification.">
-                                 <RadioGroup value={emailStoreOption} onValueChange={(value) => setEmailStoreOption(value as 'full-email' | 'hash-email' | 'no-email')} className="space-y-2">
+                                 <RadioGroup value={emailStoreOption} onValueChange={(value) => applyPrivacyPatch({ emailStoreOption: value as 'full-email' | 'hash-email' | 'no-email' })} className="space-y-2">
                                     <div className="p-3 rounded-md bg-background/50 border space-y-2">
                                         <div className="flex items-center gap-3"><RadioGroupItem value="full-email" id="full-email" /><Label htmlFor="full-email">Full Email <Info className="inline-block ml-2 h-4 w-4 text-yellow-500" /></Label></div>
                                         <div className="flex items-center gap-3"><RadioGroupItem value="hash-email" id="hash-email" /><Label htmlFor="hash-email">Hash</Label></div>
@@ -580,7 +711,7 @@ export default function SettingsPage() {
                             </SettingsSection>
                             <Separator className="my-6" />
                              <SettingsSection title="LOCATION" description="Location of the subscriber is used for user segmentation based on location.">
-                                <RadioGroup value={locationStoreOption} onValueChange={(value) => setLocationStoreOption(value as 'yes' | 'no')} className="space-y-2">
+                                <RadioGroup value={locationStoreOption} onValueChange={(value) => applyPrivacyPatch({ locationStoreOption: value as 'yes' | 'no' })} className="space-y-2">
                                     <div className="p-3 rounded-md bg-background/50 border space-y-2">
                                         <div className="flex items-center gap-3"><RadioGroupItem value="yes" id="loc-yes" /><Label htmlFor="loc-yes">Yes <Info className="inline-block ml-2 h-4 w-4 text-yellow-500" /></Label></div>
                                         <div className="flex items-center gap-3"><RadioGroupItem value="no" id="loc-no" /><Label htmlFor="loc-no">No</Label></div>
@@ -594,7 +725,7 @@ export default function SettingsPage() {
                             </SettingsSection>
                             <Separator className="my-6" />
                             <SettingsSection title="NAME" description="Name of the subscriber is used by placeholders in notification like {{customer_first_name}}">
-                                 <RadioGroup value={nameStoreOption} onValueChange={(value) => setNameStoreOption(value as 'yes' | 'no')} className="space-y-2">
+                                 <RadioGroup value={nameStoreOption} onValueChange={(value) => applyPrivacyPatch({ nameStoreOption: value as 'yes' | 'no' })} className="space-y-2">
                                      <div className="p-3 rounded-md bg-background/50 border space-y-2">
                                         <div className="flex items-center gap-3"><RadioGroupItem value="yes" id="name-yes" /><Label htmlFor="name-yes">Yes <Info className="inline-block ml-2 h-4 w-4 text-yellow-500" /></Label></div>
                                         <div className="flex items-center gap-3"><RadioGroupItem value="no" id="name-no" /><Label htmlFor="name-no">No</Label></div>
@@ -610,7 +741,7 @@ export default function SettingsPage() {
                     </Card>
                     <div className="flex justify-end">
                         <Button onClick={savePrivacySettings} disabled={savePrivacyMutation.isPending}>
-                            {savePrivacyMutation.isPending ? 'Saving...' : 'Save Privacy Settings'}
+                            {savePrivacyMutation.isPending ? 'Syncing…' : 'Saved automatically'}
                         </Button>
                     </div>
                 </div>
@@ -623,7 +754,7 @@ export default function SettingsPage() {
                     <CardContent className="space-y-6">
                         <div className="max-w-xs space-y-2">
                             <Label>Attribution Model</Label>
-                            <Select value={attributionModel} onValueChange={(value) => setAttributionModel(value as 'click' | 'impression')}>
+                            <Select value={attributionModel} onValueChange={(value) => applyAttributionPatch({ attributionModel: value as 'click' | 'impression' })}>
                                 <SelectTrigger>
                                     <SelectValue placeholder="Select attribution model" />
                                 </SelectTrigger>
@@ -635,7 +766,7 @@ export default function SettingsPage() {
                         </div>
                         <div className="max-w-xs space-y-2">
                             <Label>Revenue Credit Mode</Label>
-                            <Select value={attributionCreditMode} onValueChange={(value) => setAttributionCreditMode(value as 'last_touch' | 'all_touches')}>
+                            <Select value={attributionCreditMode} onValueChange={(value) => applyAttributionPatch({ attributionCreditMode: value as 'last_touch' | 'all_touches' })}>
                                 <SelectTrigger>
                                     <SelectValue placeholder="Select credit mode" />
                                 </SelectTrigger>
@@ -654,7 +785,11 @@ export default function SettingsPage() {
                                   min={1}
                                   max={30}
                                   value={clickWindowDays}
-                                  onChange={(e) => setClickWindowDays(Math.min(30, Math.max(1, Number(e.target.value) || 1)))}
+                                  onChange={(e) =>
+                                    applyAttributionPatch({
+                                      clickWindowDays: Math.min(30, Math.max(1, Number(e.target.value) || 1)),
+                                    })
+                                  }
                                 />
                             </div>
                             <div className="space-y-2">
@@ -666,13 +801,17 @@ export default function SettingsPage() {
                                   max={30}
                                   value={impressionWindowDays}
                                   onChange={(e) =>
-                                    setImpressionWindowDays(Math.min(30, Math.max(1, Number(e.target.value) || 1)))
+                                    applyAttributionPatch({
+                                      impressionWindowDays: Math.min(30, Math.max(1, Number(e.target.value) || 1)),
+                                    })
                                   }
                                 />
                             </div>
                         </div>
                         <div>
-                          <Button onClick={saveAttributionSettings}>Save Attribution Settings</Button>
+                          <Button onClick={saveAttributionSettings} disabled={saveAttributionMutation.isPending}>
+                            {saveAttributionMutation.isPending ? 'Syncing…' : 'Saved automatically'}
+                          </Button>
                         </div>
                     </CardContent>
                 </Card>
@@ -685,5 +824,6 @@ export default function SettingsPage() {
         />
       </div>
     </div>
+    </PageLoadingShell>
   );
 }

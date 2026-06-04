@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import {
+  getAnalyticsStats,
   getAttributionSettings,
   getAutomationOverview,
   getBrandingSettings,
@@ -25,10 +26,13 @@ const CACHE_HEADERS = {
 export async function GET(request: Request) {
   try {
     const shopDomain = extractShopDomain(request);
+    const analyticsTo = new Date();
+    const analyticsFrom = new Date(analyticsTo.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     const [
       merchantOverview,
       campaignStats,
+      analyticsStats,
       subscriberKpis,
       subscriberBreakdown,
       subscriberLocations,
@@ -42,6 +46,7 @@ export async function GET(request: Request) {
     ] = await Promise.all([
       getMerchantOverview(shopDomain),
       getCampaignStats(shopDomain),
+      getAnalyticsStats(shopDomain, analyticsFrom, analyticsTo),
       getSubscriberKpis(shopDomain),
       getSubscriberBreakdown(shopDomain),
       getSubscriberLocationBreakdown(shopDomain),
@@ -69,6 +74,9 @@ export async function GET(request: Request) {
         shopDomain,
         merchantOverview,
         campaignStats,
+        analyticsStats,
+        analyticsFrom: analyticsFrom.toISOString(),
+        analyticsTo: analyticsTo.toISOString(),
         subscriberKpis,
         subscriberOverview,
         automationsOverview,

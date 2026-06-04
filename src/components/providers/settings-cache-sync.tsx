@@ -9,6 +9,7 @@ import {
 } from '@/hooks/queries/use-app-queries';
 import { useShopDomain } from '@/hooks/use-shop-domain';
 import { useSettings } from '@/context/settings-context';
+import { mergePendingSettings } from '@/lib/client/pending-settings';
 
 /** Applies React Query cached merchant settings into SettingsContext (instant UI). */
 export function SettingsCacheSync() {
@@ -61,31 +62,33 @@ export function SettingsCacheSync() {
   }, [branding, setLogo]);
 
   useEffect(() => {
-    if (!attribution?.ok) {
+    if (!shop || !attribution) {
       return;
     }
 
-    const model = String(attribution.attributionModel ?? '');
+    const merged = mergePendingSettings(shop, 'attribution', attribution);
+    const model = String(merged.attributionModel ?? '');
     if (model === 'click' || model === 'impression') {
       setAttributionModel(model);
     }
 
-    const creditMode = String(attribution.attributionCreditMode ?? '');
+    const creditMode = String(merged.attributionCreditMode ?? '');
     if (creditMode === 'last_touch' || creditMode === 'all_touches') {
       setAttributionCreditMode(creditMode);
     }
 
-    const clickDays = Number(attribution.clickWindowDays);
+    const clickDays = Number(merged.clickWindowDays);
     if (Number.isFinite(clickDays) && clickDays > 0) {
       setClickWindowDays(clickDays);
     }
 
-    const impressionDays = Number(attribution.impressionWindowDays);
+    const impressionDays = Number(merged.impressionWindowDays);
     if (Number.isFinite(impressionDays) && impressionDays > 0) {
       setImpressionWindowDays(impressionDays);
     }
   }, [
     attribution,
+    shop,
     setAttributionCreditMode,
     setAttributionModel,
     setClickWindowDays,

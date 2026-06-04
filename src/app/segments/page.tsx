@@ -3,6 +3,7 @@
 
 import { useMemo, useState, useEffect } from 'react';
 import { useSegments } from '@/hooks/queries/use-app-queries';
+import { PageLoadingShell } from '@/components/ui/loading-ui';
 import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -269,7 +270,7 @@ const AddAttributeDialog = ({
 
 export default function SegmentsPage() {
   const { shopDomain } = useSettings();
-  const { data: segmentsData } = useSegments();
+  const { data: segmentsData, isLoading, isFetching } = useSegments();
   const [resolvedShopDomain, setResolvedShopDomain] = useState('');
   const [customAttributes, setCustomAttributes] = useState(initialCustomAttributes);
   const [currentPage, setCurrentPage] = useState(1);
@@ -323,6 +324,12 @@ export default function SegmentsPage() {
 
 
   return (
+    <PageLoadingShell
+      title="Segments"
+      isLoading={isLoading}
+      hasData={Boolean(segmentsData)}
+      isFetching={isFetching}
+    >
     <div className="p-4 sm:p-6 md:p-8 flex flex-col gap-8">
       <div className="flex items-center justify-between">
         <div>
@@ -468,5 +475,6 @@ export default function SegmentsPage() {
       />
 
     </div>
+    </PageLoadingShell>
   );
 }

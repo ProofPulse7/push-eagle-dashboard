@@ -7,6 +7,9 @@ export type AppBootstrapPayload = {
   shopDomain: string;
   merchantOverview: Record<string, unknown>;
   campaignStats: Record<string, unknown>;
+  analyticsStats?: Record<string, unknown>;
+  analyticsFrom?: string;
+  analyticsTo?: string;
   subscriberKpis: Record<string, unknown>;
   subscriberOverview?: Record<string, unknown>;
   automationsOverview: Record<string, unknown>;
@@ -98,4 +101,13 @@ export const hydrateAppCache = (
     ok: true,
     stats: payload.campaignStats,
   });
+
+  const analyticsFrom = payload.analyticsFrom ?? from;
+  const analyticsTo = payload.analyticsTo ?? to;
+  if (payload.analyticsStats) {
+    queryClient.setQueryData(queryKeys.analyticsStats(shopDomain, analyticsFrom, analyticsTo), {
+      ok: true,
+      ...payload.analyticsStats,
+    });
+  }
 };

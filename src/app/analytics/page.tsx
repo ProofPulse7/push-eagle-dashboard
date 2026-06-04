@@ -14,7 +14,7 @@ import { TopAutomations } from '@/components/analytics/top-automations';
 import { DevicePerformance } from '@/components/analytics/device-performance';
 import { formatCurrency } from '@/lib/utils';
 import { DateRangePicker } from '@/components/analytics/date-range-picker';
-import { Skeleton } from '@/components/ui/skeleton';
+import { PageLoadingShell } from '@/components/ui/loading-ui';
 import { useAnalyticsStats } from '@/hooks/queries/use-app-queries';
 import { useShopDomain } from '@/hooks/use-shop-domain';
 
@@ -31,7 +31,7 @@ export default function AnalyticsPage() {
 
   const from = date?.from ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const to = date?.to ?? new Date();
-  const { data: payload, isLoading, isFetching } = useAnalyticsStats(from, to);
+  const { data: payload, isLoading, isFetching, isError, error } = useAnalyticsStats(from, to);
 
   const kpis = useMemo<KpiItem[]>(() => {
     if (!shopDomain) {
@@ -72,66 +72,52 @@ export default function AnalyticsPage() {
     ];
   }, [shopDomain, payload]);
 
-  const showSkeleton = isLoading && !payload;
+  const loadError =
+    isError && !payload
+      ? error instanceof Error
+        ? error.message
+        : 'Failed to load analytics.'
+      : null;
 
-  if (showSkeleton) {
-    return (
+  return (
+    <PageLoadingShell
+      title="Analytics"
+      description="Your central hub for performance metrics."
+      isLoading={isLoading}
+      hasData={Boolean(payload) || Boolean(shopDomain)}
+      isFetching={isFetching}
+      error={loadError}
+    >
       <div className="p-4 sm:p-6 md:p-8 flex flex-col gap-8">
         <div className="flex items-center justify-between">
           <div>
-            <Skeleton className="h-8 w-48" />
-            <Skeleton className="h-4 w-64 mt-2" />
+            <h1 className="text-2xl font-bold tracking-tight md:text-3xl flex items-center gap-2">
+              <BarChart className="h-7 w-7" />
+              Analytics
+            </h1>
+            <p className="text-muted-foreground">Your central hub for performance metrics.</p>
           </div>
-          <Skeleton className="h-10 w-60" />
+          <DateRangePicker date={date} setDate={setDate} />
         </div>
+
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <Skeleton className="h-28" />
-          <Skeleton className="h-28" />
-          <Skeleton className="h-28" />
-          <Skeleton className="h-28" />
+          {kpis.map((kpi) => (
+            <KpiCard key={kpi.title} {...kpi} />
+          ))}
         </div>
+
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
-          <Skeleton className="h-96" />
-          <Skeleton className="h-96" />
+          <PerformanceOverview dateRange={date} shopDomain={shopDomain} />
+          <RevenueAttribution dateRange={date} shopDomain={shopDomain} />
         </div>
-      </div>
-    );
-  }
 
-  return (
-    <div className="p-4 sm:p-6 md:p-8 flex flex-col gap-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight md:text-3xl flex items-center gap-2">
-            <BarChart className="h-7 w-7" />
-            Analytics
-          </h1>
-          <p className="text-muted-foreground">Your central hub for performance metrics.</p>
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
+          <TopCampaigns dateRange={date} shopDomain={shopDomain} />
+          <TopAutomations dateRange={date} shopDomain={shopDomain} />
         </div>
-        <DateRangePicker date={date} setDate={setDate} />
+
+        <DevicePerformance shopDomain={shopDomain} />
       </div>
-
-      {isFetching && payload ? (
-        <p className="text-xs text-muted-foreground">Updating analytics…</p>
-      ) : null}
-
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {kpis.map((kpi) => (
-          <KpiCard key={kpi.title} {...kpi} />
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
-        <PerformanceOverview dateRange={date} shopDomain={shopDomain} />
-        <RevenueAttribution dateRange={date} shopDomain={shopDomain} />
-      </div>
-
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
-        <TopCampaigns dateRange={date} shopDomain={shopDomain} />
-        <TopAutomations dateRange={date} shopDomain={shopDomain} />
-      </div>
-
-      <DevicePerformance shopDomain={shopDomain} />
-    </div>
+    </PageLoadingShell>
   );
 }

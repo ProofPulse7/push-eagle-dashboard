@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
+import { PageLoadingShell } from '@/components/ui/loading-ui';
 import { formatCurrency, formatNumber } from '@/lib/utils';
 
 type RuleKey =
@@ -233,6 +234,13 @@ export default function AutomationsPage() {
     };
 
     return (
+        <PageLoadingShell
+            title="Automations"
+            isLoading={loading}
+            hasData={Boolean(data)}
+            isFetching={isFetching}
+            error={loadError}
+        >
         <div className="min-h-full bg-slate-50/80 p-4 sm:p-6 md:p-8">
             <div className="mx-auto flex max-w-7xl flex-col gap-6">
                 <div className="flex items-start justify-between gap-4">
@@ -355,5 +363,6 @@ export default function AutomationsPage() {
                 </section>
             </div>
         </div>
+        </PageLoadingShell>
     );
 }

@@ -9,6 +9,7 @@ import {
 } from '@tanstack/react-query';
 
 import { fetchJson, fetchJsonWithShop } from '@/lib/client/api-fetch';
+import { clearPendingSettings } from '@/lib/client/pending-settings';
 import {
   hydrateAppCache,
   type AppBootstrapPayload,
@@ -203,6 +204,7 @@ export function useAnalyticsStats(from: Date, to: Date) {
         `/api/analytics/stats?shop=${encodeURIComponent(shop)}&from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`,
       ),
     enabled: Boolean(shop),
+    staleTime: SETTINGS_STALE_MS,
     placeholderData: (previous) => previous,
   });
 }
@@ -250,6 +252,9 @@ export function useSaveBrandingSettings() {
         queryClient.setQueryData(queryKeys.branding(shop), context.previous);
       }
     },
+    onSuccess: () => {
+      clearPendingSettings(shop, 'branding');
+    },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.branding(shop) });
     },
@@ -285,6 +290,9 @@ export function useSaveAttributionSettings() {
         queryClient.setQueryData(queryKeys.attribution(shop), context.previous);
       }
     },
+    onSuccess: () => {
+      clearPendingSettings(shop, 'attribution');
+    },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.attribution(shop) });
     },
@@ -317,6 +325,9 @@ export function useSavePrivacySettings() {
       if (context?.previous) {
         queryClient.setQueryData(queryKeys.privacy(shop), context.previous);
       }
+    },
+    onSuccess: () => {
+      clearPendingSettings(shop, 'privacy');
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.privacy(shop) });
