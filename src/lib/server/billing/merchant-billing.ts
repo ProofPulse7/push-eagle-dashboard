@@ -236,6 +236,16 @@ export const markBillingCheckoutPending = async (input: {
   `;
 };
 
+export const clearBillingCheckoutPending = async (shopDomain: string) => {
+  await ensureBillingSchema(shopDomain);
+  const sql = getNeonSql();
+  await sql`
+    UPDATE merchant_billing
+    SET status = 'active', updated_at = NOW()
+    WHERE shop_domain = ${shopDomain} AND status = 'pending'
+  `;
+};
+
 export const upsertMerchantBilling = async (input: {
   shopDomain: string;
   planKey: PlanKey;

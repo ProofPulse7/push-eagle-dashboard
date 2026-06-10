@@ -132,25 +132,43 @@ export function PlansPageContent() {
 
   const billingReturnHandled = useRef(false);
   useEffect(() => {
-    if (searchParams.get('billing') !== 'return' || billingReturnHandled.current) {
+    if (searchParams.get('billing') !== 'return' || billingReturnHandled.current || !shop) {
       return;
     }
+
     billingReturnHandled.current = true;
     confirmBilling.mutate(undefined, {
       onSuccess: (result) => {
         if (result?.activated) {
-          toast({ title: 'Plan activated', description: 'Your Shopify subscription is now active.' });
+          toast({
+            title: 'Billing updated',
+            description: 'Your plan is synced with your Shopify subscription.',
+          });
+          return;
         }
-      },
-      onError: () => {
+
+        if (String(result?.billing?.status ?? '') === 'active') {
+          return;
+        }
+
         toast({
           variant: 'destructive',
           title: 'Billing confirmation pending',
-          description: 'Complete approval in Shopify if you have not already.',
+          description:
+            typeof result?.message === 'string'
+              ? result.message
+              : 'Complete approval in Shopify if you have not already.',
+        });
+      },
+      onError: (error) => {
+        toast({
+          variant: 'destructive',
+          title: 'Could not confirm billing',
+          description: error instanceof Error ? error.message : 'Try refreshing the page.',
         });
       },
     });
-  }, [searchParams, confirmBilling, toast]);
+  }, [searchParams, shop, confirmBilling, toast]);
 
   const startShopifyCheckout = (planKey: 'basic' | 'business', tierId?: string) => {
     if (!shop) {
