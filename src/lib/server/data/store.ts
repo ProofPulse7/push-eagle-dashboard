@@ -1661,8 +1661,7 @@ export const pruneUnusedCampaignDeviceImages = async (olderThanDays = 30) => {
         image_url = COALESCE(${keeperUrl}, image_url),
         windows_image_url = ${unusedUrls.includes(String(row.windows_image_url ?? '')) ? null : row.windows_image_url},
         macos_image_url = ${unusedUrls.includes(String(row.macos_image_url ?? '')) ? null : row.macos_image_url},
-        android_image_url = ${unusedUrls.includes(String(row.android_image_url ?? '')) ? null : row.android_image_url},
-        updated_at = NOW()
+        android_image_url = ${unusedUrls.includes(String(row.android_image_url ?? '')) ? null : row.android_image_url}
       WHERE id = ${campaignId}
         AND shop_domain = ${shopDomain}
     `;
