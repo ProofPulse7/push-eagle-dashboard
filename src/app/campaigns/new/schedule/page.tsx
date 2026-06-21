@@ -8,7 +8,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useCampaignState, clearCampaignDraft } from '@/context/campaign-context';
 import { useSettings } from '@/context/settings-context';
 import { buildAudienceSegmentsFromCache, bumpDashboardCampaignSent, patchOptimisticCampaign, prependOptimisticCampaign, replaceOptimisticCampaignId } from '@/lib/client/optimistic-campaigns';
-import { saveCampaignDraftInstantly, runBackgroundCampaignDraftSave } from '@/lib/client/campaign-save-draft';
+import { commitCampaignDraftSave } from '@/lib/client/campaign-save-draft';
 import { cacheLaunchMedia } from '@/lib/client/campaign-launch-media-cache';
 import {
   clearWizardLaunchMediaCache,
@@ -425,22 +425,22 @@ export default function ScheduleCampaignPage() {
                 flashSaleUrgencyText,
             };
 
-            const { campaignsHref, optimisticId } = saveCampaignDraftInstantly(draftInput, queryClient);
-
-            toast({
-                title: "Draft Saved!",
-                description: "Your campaign has been saved as a draft.",
-            });
-
-            clearCampaignDraft(shopDomain);
-            router.push(campaignsHref);
-
-            void runBackgroundCampaignDraftSave(draftInput, queryClient, optimisticId, (error) => {
-                toast({
-                    variant: 'destructive',
-                    title: 'Draft save failed',
-                    description: error.message,
-                });
+            commitCampaignDraftSave(draftInput, queryClient, {
+                onNavigate: (campaignsHref) => {
+                    toast({
+                        title: "Draft Saved!",
+                        description: "Your campaign has been saved as a draft.",
+                    });
+                    clearCampaignDraft(shopDomain);
+                    router.push(campaignsHref);
+                },
+                onError: (error) => {
+                    toast({
+                        variant: 'destructive',
+                        title: 'Draft save failed',
+                        description: error.message,
+                    });
+                },
             });
         } catch (error) {
             toast({
@@ -569,14 +569,14 @@ export default function ScheduleCampaignPage() {
                 </div>
             </div>
              <div className="flex justify-end gap-2">
-                <Button variant="outline" onClick={handleSaveDraft} disabled={isSaving}>
-                    {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                    {isSaving ? 'Saving...' : 'Save as Draft'}
+                <Button variant="outline" onClick={handleSaveDraft}>
+                    <Save className="mr-2 h-4 w-4" />
+                    Save as Draft
                 </Button>
                 <Button 
                     size="lg" 
                     onClick={handleLaunchCampaign} 
-                    disabled={isSaving || isLaunching || !title || !primaryLink}
+                    disabled={isLaunching || !title || !primaryLink}
                 >
                     {isLaunching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
                     {isLaunching
