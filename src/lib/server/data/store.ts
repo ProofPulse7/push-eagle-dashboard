@@ -3441,7 +3441,12 @@ export const pruneAutomationData = async () => {
   const sql = getNeonSql();
 
   const now = Date.now();
-  const webhookCutoff = new Date(now - readRetentionDays('PE_RETENTION_WEBHOOK_EVENT_DAYS', 30) * DAY_MS);
+  // webhook_events is ONLY an idempotency/dedup log (INSERT ... ON CONFLICT DO
+  // NOTHING) plus a short diagnostics list. Shopify only retries a webhook for
+  // ~48h, so a 5-day window fully covers dedup with buffer while keeping what is
+  // otherwise the single largest Neon table (it was ~34% of the DB at 30 days)
+  // tiny. Env-tunable if a longer diagnostics history is ever wanted.
+  const webhookCutoff = new Date(now - readRetentionDays('PE_RETENTION_WEBHOOK_EVENT_DAYS', 5) * DAY_MS);
   const activityCutoff = new Date(now - readRetentionDays('PE_RETENTION_ACTIVITY_DAYS', 45) * DAY_MS);
   // automation_jobs is the high-volume automation queue. We only ever prune jobs
   // in a terminal state (never pending/processing work), keeping Neon bounded the
