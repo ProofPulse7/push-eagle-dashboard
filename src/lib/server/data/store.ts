@@ -457,7 +457,7 @@ const parseScopes = (value?: string | null) =>
     .map((scope) => scope.trim())
     .filter(Boolean);
 
-const SCHEMA_READY_KV_KEY = 'pe:schema:ready:v1';
+const SCHEMA_READY_KV_KEY = 'pe:schema:ready:v2';
 const SCHEMA_READY_TTL_SECONDS = 6 * 60 * 60;
 
 const ensureSchema = async () => {
