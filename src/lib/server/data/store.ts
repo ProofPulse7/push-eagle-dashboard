@@ -457,7 +457,7 @@ const parseScopes = (value?: string | null) =>
     .map((scope) => scope.trim())
     .filter(Boolean);
 
-const SCHEMA_READY_KV_KEY = 'pe:schema:ready:v2';
+const SCHEMA_READY_KV_KEY = 'pe:schema:ready:v3';
 const SCHEMA_READY_TTL_SECONDS = 6 * 60 * 60;
 
 const ensureSchema = async () => {
@@ -757,6 +757,26 @@ const ensureSchema = async () => {
         order_id TEXT,
         converted_at TIMESTAMPTZ,
         revenue_cents INTEGER NOT NULL DEFAULT 0
+      )`;
+
+      // Durable, permanent per-rule automation stats. The row-level
+      // automation_deliveries / automation_clicks tables are pruned at scale to
+      // keep Neon bounded, but merchants must ALWAYS see lifetime automation
+      // impressions/clicks/revenue. This table holds the FROZEN aggregate of rows
+      // that have already been pruned; all-time stats are then computed as
+      // (archived here) + (live SUM of the not-yet-pruned detail). At prune time
+      // the rows being deleted are folded into these counters in the SAME atomic
+      // statement (see pruneHighVolumeTimeSeries), so the lifetime total is always
+      // continuous with zero drift and zero double-counting. Tiny: one row per
+      // shop x rule_key (a few hundred rows even at 30 merchants), kept forever.
+      await sql`CREATE TABLE IF NOT EXISTS automation_rule_stats (
+        shop_domain TEXT NOT NULL,
+        rule_key TEXT NOT NULL,
+        archived_impressions BIGINT NOT NULL DEFAULT 0,
+        archived_clicks BIGINT NOT NULL DEFAULT 0,
+        archived_revenue_cents BIGINT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (shop_domain, rule_key)
       )`;
 
       await sql`CREATE TABLE IF NOT EXISTS shopify_orders (
@@ -2453,7 +2473,7 @@ export const getAutomationOverview = async (shopDomain: string) => {
   await ensureAutomationRules(shopDomain);
   const sql = getNeonSql();
 
-  const [rules, deliveryStats, clickStats] = await Promise.all([
+  const [rules, deliveryStats, clickStats, archivedStats] = await Promise.all([
     listAutomationRules(shopDomain),
     sql`
       SELECT
@@ -2473,6 +2493,15 @@ export const getAutomationOverview = async (shopDomain: string) => {
       WHERE shop_domain = ${shopDomain}
       GROUP BY rule_key
     `,
+    // Lifetime totals of already-pruned rows (see automation_rule_stats). Adding
+    // these to the live detail sums keeps all-time per-rule stats permanent even
+    // after the raw rows are pruned. Zero before any pruning has happened, so this
+    // never changes displayed numbers at rollout.
+    sql`
+      SELECT rule_key, archived_impressions, archived_clicks, archived_revenue_cents
+      FROM automation_rule_stats
+      WHERE shop_domain = ${shopDomain}
+    `,
   ]);
 
   const deliveriesByRule = new Map(
@@ -2487,15 +2516,23 @@ export const getAutomationOverview = async (shopDomain: string) => {
       revenueCents: Number(row.revenue_cents ?? 0),
     }]),
   );
+  const archivedByRule = new Map(
+    archivedStats.map((row) => [String(row.rule_key), {
+      impressions: Number(row.archived_impressions ?? 0),
+      clicks: Number(row.archived_clicks ?? 0),
+      revenueCents: Number(row.archived_revenue_cents ?? 0),
+    }]),
+  );
 
   const summaries = rules.map((rule) => {
     const delivery = deliveriesByRule.get(rule.ruleKey) ?? { impressions: 0, revenueCents: 0 };
     const click = clicksByRule.get(rule.ruleKey) ?? { clicks: 0, revenueCents: 0 };
+    const archived = archivedByRule.get(rule.ruleKey) ?? { impressions: 0, clicks: 0, revenueCents: 0 };
     return {
       ...rule,
-      impressions: delivery.impressions,
-      clicks: click.clicks,
-      revenueCents: delivery.revenueCents + click.revenueCents,
+      impressions: delivery.impressions + archived.impressions,
+      clicks: click.clicks + archived.clicks,
+      revenueCents: delivery.revenueCents + click.revenueCents + archived.revenueCents,
     };
   });
 
@@ -2521,7 +2558,7 @@ export const getAutomationStats = async (
   const sql = getNeonSql();
   const hasRange = Boolean(from && to);
 
-  const [rules, deliveryStats, clickStats] = await Promise.all([
+  const [rules, deliveryStats, clickStats, archivedStats] = await Promise.all([
     listAutomationRules(shopDomain),
     hasRange
       ? sql`
@@ -2565,6 +2602,17 @@ export const getAutomationStats = async (
           WHERE shop_domain = ${shopDomain}
           GROUP BY rule_key
         `,
+    // Only all-time (no date range) folds in the archived baseline of pruned rows.
+    // A bounded date range is served purely from the retained detail (retention
+    // must stay >= the largest selectable range, currently 90d <= 120d), so adding
+    // the (non-date-bucketed) archived totals there would over-count.
+    hasRange
+      ? Promise.resolve([] as Array<Record<string, unknown>>)
+      : sql`
+          SELECT rule_key, archived_impressions, archived_clicks, archived_revenue_cents
+          FROM automation_rule_stats
+          WHERE shop_domain = ${shopDomain}
+        `,
   ]);
 
   const deliveriesByRule = new Map(
@@ -2579,15 +2627,23 @@ export const getAutomationStats = async (
       revenueCents: Number(row.revenue_cents ?? 0),
     }]),
   );
+  const archivedByRule = new Map(
+    archivedStats.map((row) => [String(row.rule_key), {
+      impressions: Number(row.archived_impressions ?? 0),
+      clicks: Number(row.archived_clicks ?? 0),
+      revenueCents: Number(row.archived_revenue_cents ?? 0),
+    }]),
+  );
 
   const summaries = rules.map((rule) => {
     const delivery = deliveriesByRule.get(rule.ruleKey) ?? { impressions: 0, revenueCents: 0 };
     const click = clicksByRule.get(rule.ruleKey) ?? { clicks: 0, revenueCents: 0 };
+    const archived = archivedByRule.get(rule.ruleKey) ?? { impressions: 0, clicks: 0, revenueCents: 0 };
     return {
       ...rule,
-      impressions: delivery.impressions,
-      clicks: click.clicks,
-      revenueCents: delivery.revenueCents + click.revenueCents,
+      impressions: delivery.impressions + archived.impressions,
+      clicks: click.clicks + archived.clicks,
+      revenueCents: delivery.revenueCents + click.revenueCents + archived.revenueCents,
     };
   });
 
@@ -3599,13 +3655,16 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * Prunes the unbounded per-recipient delivery/click history and old Shopify
  * order/fulfillment cache rows from Neon. This is the single biggest lever for
  * staying inside the Neon free tier at scale: it caps row count (and therefore
- * storage + scan cost) regardless of total lifetime volume, without touching any
- * read path — recent data (attribution, welcome-step dedup, campaign detail
- * views) is fully retained, and all-time stats live in merchant_daily_stats.
+ * storage + scan cost) regardless of total lifetime volume. Recent data
+ * (attribution, welcome-step dedup, campaign detail views) is fully retained, and
+ * lifetime merchant-visible stats are preserved durably: per-campaign totals on
+ * the campaigns row, and per-rule automation totals in automation_rule_stats
+ * (folded in atomically as rows are deleted, below).
  *
- * We deliberately do NOT use RETURNING here: at scale that would stream every
- * deleted id back over the wire and burn the very network transfer we are trying
- * to conserve.
+ * The plain campaign deletes deliberately omit RETURNING: at scale that would
+ * stream every deleted id back over the wire and burn the very network transfer
+ * we are trying to conserve. The automation folds DO use RETURNING, but it is
+ * consumed server-side by the INSERT (never streamed to the app).
  */
 export const pruneHighVolumeTimeSeries = async () => {
   await ensureSchema();
@@ -3621,10 +3680,53 @@ export const pruneHighVolumeTimeSeries = async () => {
   const fulfillmentCutoff = new Date(now - fulfillmentDays * DAY_MS);
 
   // Sequential to keep peak Neon compute/connections low during maintenance.
+  //
+  // Campaign detail can be deleted outright: per-campaign lifetime
+  // impressions/clicks/revenue live durably on the campaigns row
+  // (delivery_count / click_count / revenue_cents), which is maintained during
+  // send/click/attribution and never derived from these rows.
   await sql`DELETE FROM campaign_deliveries WHERE delivered_at < ${deliveryCutoff}`;
   await sql`DELETE FROM campaign_clicks WHERE clicked_at < ${deliveryCutoff}`;
-  await sql`DELETE FROM automation_deliveries WHERE delivered_at < ${deliveryCutoff}`;
-  await sql`DELETE FROM automation_clicks WHERE clicked_at < ${deliveryCutoff}`;
+
+  // Automations have NO other durable stat source, so before deleting the rows we
+  // fold their aggregate into automation_rule_stats in the SAME statement. The
+  // DELETE ... RETURNING feeds the INSERT server-side (nothing is streamed back to
+  // the app), so this stays cheap on network while guaranteeing lifetime per-rule
+  // totals never drop and can never double-count (folded rows are gone).
+  await sql`
+    WITH deleted AS (
+      DELETE FROM automation_deliveries
+      WHERE delivered_at < ${deliveryCutoff}
+      RETURNING shop_domain, rule_key, revenue_cents
+    )
+    INSERT INTO automation_rule_stats (
+      shop_domain, rule_key, archived_impressions, archived_clicks, archived_revenue_cents, updated_at
+    )
+    SELECT shop_domain, rule_key, COUNT(*)::BIGINT, 0::BIGINT, COALESCE(SUM(revenue_cents), 0)::BIGINT, NOW()
+    FROM deleted
+    GROUP BY shop_domain, rule_key
+    ON CONFLICT (shop_domain, rule_key) DO UPDATE SET
+      archived_impressions = automation_rule_stats.archived_impressions + EXCLUDED.archived_impressions,
+      archived_revenue_cents = automation_rule_stats.archived_revenue_cents + EXCLUDED.archived_revenue_cents,
+      updated_at = NOW()
+  `;
+  await sql`
+    WITH deleted AS (
+      DELETE FROM automation_clicks
+      WHERE clicked_at < ${deliveryCutoff}
+      RETURNING shop_domain, rule_key, revenue_cents
+    )
+    INSERT INTO automation_rule_stats (
+      shop_domain, rule_key, archived_impressions, archived_clicks, archived_revenue_cents, updated_at
+    )
+    SELECT shop_domain, rule_key, 0::BIGINT, COUNT(*)::BIGINT, COALESCE(SUM(revenue_cents), 0)::BIGINT, NOW()
+    FROM deleted
+    GROUP BY shop_domain, rule_key
+    ON CONFLICT (shop_domain, rule_key) DO UPDATE SET
+      archived_clicks = automation_rule_stats.archived_clicks + EXCLUDED.archived_clicks,
+      archived_revenue_cents = automation_rule_stats.archived_revenue_cents + EXCLUDED.archived_revenue_cents,
+      updated_at = NOW()
+  `;
   // order_items cascade via shopify_order_items.order_event_id ON DELETE CASCADE.
   await sql`DELETE FROM shopify_orders WHERE created_at < ${orderCutoff}`;
   await sql`DELETE FROM shopify_order_items WHERE created_at < ${orderCutoff}`;
