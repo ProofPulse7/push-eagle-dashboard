@@ -1736,6 +1736,99 @@ export const d1UpsertAudienceAuthoritative = async (
 };
 
 /**
+ * Isolated end-to-end proof that the d1_only authoritative write path works
+ * against the live D1 audience database, without touching any real merchant's
+ * data. Writes to a dedicated `__selftest__` shop, verifies the row is readable
+ * with the ids D1 assigned, confirms idempotency (second write updates, does not
+ * duplicate), then deletes the test rows. Run this before flipping D1_AUDIENCE_MODE
+ * to d1_only.
+ */
+export const d1AudienceSelfTest = async (): Promise<{
+  ok: boolean;
+  steps: Array<{ step: string; ok: boolean; detail?: string }>;
+}> => {
+  const steps: Array<{ step: string; ok: boolean; detail?: string }> = [];
+  const shopDomain = '__selftest__.myshopify.com';
+  const marker = `__selftest__${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const baseInput = {
+    shopDomain,
+    externalId: marker,
+    browser: 'selftest',
+    platform: 'selftest',
+    locale: 'en',
+    country: 'US',
+    city: 'Test',
+    deviceContext: null,
+    token: marker,
+    userAgent: 'selftest',
+    tokenType: 'fcm',
+    vapidEndpoint: null,
+    vapidP256dh: null,
+    vapidAuth: null,
+  } as const;
+  let ok = true;
+
+  try {
+    await ensureD1AudienceSchema();
+
+    const first = await d1UpsertAudienceAuthoritative({ ...baseInput });
+    const firstOk =
+      Number.isFinite(first.subscriberId) &&
+      Number.isFinite(first.tokenId) &&
+      first.subscriberId > 0 &&
+      first.tokenId > 0 &&
+      first.tokenWasInserted === true;
+    steps.push({ step: 'insert', ok: firstOk, detail: JSON.stringify(first) });
+    ok = ok && firstOk;
+
+    const readRows = (await runD1Query(
+      `SELECT s.id AS sub_id, s.browser AS browser, t.id AS tok_id, t.status AS status
+       FROM subscribers s
+       JOIN subscriber_tokens t ON t.subscriber_id = s.id AND t.shop_domain = s.shop_domain
+       WHERE s.shop_domain = ? AND s.external_id = ?
+       LIMIT 1`,
+      [shopDomain, marker],
+    )) as Array<Record<string, unknown>>;
+    const readOk =
+      readRows.length === 1 &&
+      Number(readRows[0]?.sub_id) === first.subscriberId &&
+      Number(readRows[0]?.tok_id) === first.tokenId &&
+      readRows[0]?.status === 'active';
+    steps.push({ step: 'readback', ok: readOk, detail: JSON.stringify(readRows) });
+    ok = ok && readOk;
+
+    const second = await d1UpsertAudienceAuthoritative({ ...baseInput });
+    const secondOk =
+      second.subscriberId === first.subscriberId &&
+      second.tokenId === first.tokenId &&
+      second.tokenWasInserted === false;
+    steps.push({ step: 'idempotent-update', ok: secondOk, detail: JSON.stringify(second) });
+    ok = ok && secondOk;
+  } catch (error) {
+    ok = false;
+    steps.push({
+      step: 'error',
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error ?? ''),
+    });
+  } finally {
+    try {
+      await runD1Query(`DELETE FROM subscriber_tokens WHERE shop_domain = ?`, [shopDomain]);
+      await runD1Query(`DELETE FROM subscribers WHERE shop_domain = ?`, [shopDomain]);
+      steps.push({ step: 'cleanup', ok: true });
+    } catch (error) {
+      steps.push({
+        step: 'cleanup',
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error ?? ''),
+      });
+    }
+  }
+
+  return { ok, steps };
+};
+
+/**
  * d1_only iOS home-screen confirmation: mark the subscriber (creating a stub if
  * the confirm arrives before the first token, matching the Neon upsert).
  */

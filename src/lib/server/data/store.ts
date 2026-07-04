@@ -880,6 +880,24 @@ const ensureSchema = async () => {
         metadata JSONB
       )`;
 
+      // Zero-loss safety net for d1_only: when the authoritative D1 token write
+      // fails, the raw payload is buffered here so a cron reconciler can replay it
+      // into D1 (which assigns the id). Deliberately NO foreign key so a missing
+      // merchant row can never block a token from being durably captured. Stays
+      // near-empty because the reconciler drains it every tick.
+      await sql`CREATE TABLE IF NOT EXISTS d1_audience_outbox (
+        id BIGSERIAL PRIMARY KEY,
+        shop_domain TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        fcm_token TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_d1_audience_outbox_shop_token ON d1_audience_outbox(shop_domain, fcm_token)`;
+
       await sql`CREATE TABLE IF NOT EXISTS merchant_daily_stats (
         shop_domain TEXT NOT NULL REFERENCES merchants(shop_domain) ON DELETE CASCADE,
         stat_date DATE NOT NULL,
@@ -2932,34 +2950,64 @@ const resolveAutomationExternalIds = async (input: {
       ),
     );
 
+    const {
+      audienceRead: audReadAlias,
+      d1FilterExternalIdsWithActiveToken,
+      d1ExternalIdsByClientIds,
+    } = await import('@/lib/server/integrations/d1-audience');
+    const sortedExternalIdKey = (rows: Array<{ external_id: string }>) =>
+      rows.map((r) => r.external_id).sort().join(',');
+
     const aliasRows = externalIdAliases.length > 0
-      ? await sql`
-        SELECT DISTINCT s.external_id
-        FROM subscribers s
-        JOIN subscriber_tokens t ON t.subscriber_id = s.id
-        WHERE s.shop_domain = ${input.shopDomain}
-          AND s.external_id = ANY(${externalIdAliases})
-          AND t.shop_domain = ${input.shopDomain}
-          AND t.status = 'active'
-        LIMIT 100
-      `
+      ? await audReadAlias<Array<{ external_id: string }>>({
+          label: 'resolveAutomationExternalIds.alias.d1events',
+          key: sortedExternalIdKey,
+          neon: async () =>
+            (
+              await sql`
+                SELECT DISTINCT s.external_id
+                FROM subscribers s
+                JOIN subscriber_tokens t ON t.subscriber_id = s.id
+                WHERE s.shop_domain = ${input.shopDomain}
+                  AND s.external_id = ANY(${externalIdAliases})
+                  AND t.shop_domain = ${input.shopDomain}
+                  AND t.status = 'active'
+                LIMIT 100
+              `
+            ).map((row) => ({ external_id: String(row.external_id) })),
+          d1: async () =>
+            (await d1FilterExternalIdsWithActiveToken(input.shopDomain, externalIdAliases)).map(
+              (external_id) => ({ external_id }),
+            ),
+        })
       : [];
 
     const clientIdSubscriberFallback =
       fallbackClientIds.length > 0 && aliasRows.length === 0
-        ? await sql`
-          SELECT DISTINCT s.external_id
-          FROM subscribers s
-          JOIN subscriber_tokens t ON t.subscriber_id = s.id
-          WHERE s.shop_domain = ${input.shopDomain}
-            AND t.shop_domain = ${input.shopDomain}
-            AND t.status = 'active'
-            AND (
-              COALESCE(s.device_context ->> 'clientId', '') = ANY(${fallbackClientIds})
-              OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ANY(${fallbackClientIds})
-            )
-          LIMIT 100
-        `
+        ? await audReadAlias<Array<{ external_id: string }>>({
+            label: 'resolveAutomationExternalIds.clientIdFallback.d1events',
+            key: sortedExternalIdKey,
+            neon: async () =>
+              (
+                await sql`
+                  SELECT DISTINCT s.external_id
+                  FROM subscribers s
+                  JOIN subscriber_tokens t ON t.subscriber_id = s.id
+                  WHERE s.shop_domain = ${input.shopDomain}
+                    AND t.shop_domain = ${input.shopDomain}
+                    AND t.status = 'active'
+                    AND (
+                      COALESCE(s.device_context ->> 'clientId', '') = ANY(${fallbackClientIds})
+                      OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ANY(${fallbackClientIds})
+                    )
+                  LIMIT 100
+                `
+              ).map((row) => ({ external_id: String(row.external_id) })),
+            d1: async () =>
+              (await d1ExternalIdsByClientIds(input.shopDomain, fallbackClientIds)).map(
+                (external_id) => ({ external_id }),
+              ),
+          })
         : [];
 
     const resolvedExternalIds = Array.from(
@@ -3076,44 +3124,91 @@ const resolveAutomationExternalIds = async (input: {
     `
     : [];
 
+  const {
+    audienceRead: audReadAlias2,
+    d1FilterExternalIdsWithActiveToken: d1FilterAlias2,
+    d1ExternalIdsByClientIds: d1ByClientIds2,
+  } = await import('@/lib/server/integrations/d1-audience');
+  const sortedExternalIdKey2 = (rows: Array<{ external_id: string }>) =>
+    rows.map((r) => r.external_id).sort().join(',');
+
   const aliasRows = externalIdAliases.length > 0
-    ? await sql`
-      SELECT DISTINCT s.external_id
-      FROM subscribers s
-      JOIN subscriber_tokens t ON t.subscriber_id = s.id
-      WHERE s.shop_domain = ${input.shopDomain}
-        AND s.external_id = ANY(${externalIdAliases})
-        AND t.shop_domain = ${input.shopDomain}
-        AND t.status = 'active'
-      LIMIT 100
-    `
+    ? await audReadAlias2<Array<{ external_id: string }>>({
+        label: 'resolveAutomationExternalIds.alias.neon',
+        key: sortedExternalIdKey2,
+        neon: async () =>
+          (
+            await sql`
+              SELECT DISTINCT s.external_id
+              FROM subscribers s
+              JOIN subscriber_tokens t ON t.subscriber_id = s.id
+              WHERE s.shop_domain = ${input.shopDomain}
+                AND s.external_id = ANY(${externalIdAliases})
+                AND t.shop_domain = ${input.shopDomain}
+                AND t.status = 'active'
+              LIMIT 100
+            `
+          ).map((row) => ({ external_id: String(row.external_id) })),
+        d1: async () =>
+          (await d1FilterAlias2(input.shopDomain, externalIdAliases)).map((external_id) => ({
+            external_id,
+          })),
+      })
     : [];
 
   // Fallback: if we have a clientId, find subscribers who share that clientId via device context.
   // This provides a reliable identity link when pixel events come before cart registration.
   const clientIdSubscriberFallback =
     fallbackClientIds.length > 0 && aliasRows.length === 0
-      ? await sql`
-        SELECT DISTINCT s.external_id
-        FROM subscribers s
-        JOIN subscriber_tokens t ON t.subscriber_id = s.id
-        WHERE s.shop_domain = ${input.shopDomain}
-          AND t.shop_domain = ${input.shopDomain}
-          AND t.status = 'active'
-          AND (
-            COALESCE(s.device_context ->> 'clientId', '') = ANY(${fallbackClientIds})
-            OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ANY(${fallbackClientIds})
-            OR EXISTS (
-              SELECT 1 FROM pixel_events
-              WHERE pixel_events.shop_domain = ${input.shopDomain}
-                AND COALESCE(pixel_events.client_id, '') = ANY(${fallbackClientIds})
-                AND COALESCE(pixel_events.external_id, '') = s.external_id
-                LIMIT 1
-            )
-          )
-        ORDER BY t.last_seen_at DESC NULLS LAST, s.last_seen_at DESC NULLS LAST
-        LIMIT 50
-      `
+      ? await audReadAlias2<Array<{ external_id: string }>>({
+          label: 'resolveAutomationExternalIds.clientIdFallback.neon',
+          key: sortedExternalIdKey2,
+          neon: async () =>
+            (
+              await sql`
+                SELECT DISTINCT s.external_id
+                FROM subscribers s
+                JOIN subscriber_tokens t ON t.subscriber_id = s.id
+                WHERE s.shop_domain = ${input.shopDomain}
+                  AND t.shop_domain = ${input.shopDomain}
+                  AND t.status = 'active'
+                  AND (
+                    COALESCE(s.device_context ->> 'clientId', '') = ANY(${fallbackClientIds})
+                    OR COALESCE(s.device_context ->> 'shopifyAnalyticsClientId', '') = ANY(${fallbackClientIds})
+                    OR EXISTS (
+                      SELECT 1 FROM pixel_events
+                      WHERE pixel_events.shop_domain = ${input.shopDomain}
+                        AND COALESCE(pixel_events.client_id, '') = ANY(${fallbackClientIds})
+                        AND COALESCE(pixel_events.external_id, '') = s.external_id
+                        LIMIT 1
+                    )
+                  )
+                ORDER BY t.last_seen_at DESC NULLS LAST, s.last_seen_at DESC NULLS LAST
+                LIMIT 50
+              `
+            ).map((row) => ({ external_id: String(row.external_id) })),
+          d1: async () => {
+            // device_context match lives in D1; the pixel_events identity link lives
+            // in Neon, so pull candidate external_ids from Neon then keep only those
+            // that still have an active token in D1.
+            const direct = await d1ByClientIds2(input.shopDomain, fallbackClientIds);
+            const pxRows = await sql`
+              SELECT DISTINCT external_id
+              FROM pixel_events
+              WHERE shop_domain = ${input.shopDomain}
+                AND COALESCE(client_id, '') = ANY(${fallbackClientIds})
+                AND COALESCE(external_id, '') <> ''
+              LIMIT 200
+            `;
+            const pxExternalIds = pxRows
+              .map((row) => String(row.external_id ?? ''))
+              .filter(Boolean);
+            const pxWithToken = await d1FilterAlias2(input.shopDomain, pxExternalIds);
+            return Array.from(new Set([...direct, ...pxWithToken])).map((external_id) => ({
+              external_id,
+            }));
+          },
+        })
       : [];
 
   const candidates = Array.from(
@@ -3454,6 +3549,28 @@ export const rollupMerchantDailyStats = async () => {
     RETURNING shop_domain
   `;
 
+  // In d1_only the subscribers LATERAL above sees an empty Neon table, so patch the
+  // new-subscriber counts from D1 (read/shadow keep Neon current via dual-write).
+  const { isD1AudienceOnly, d1CountNewSubscribersPerShop } = await import(
+    '@/lib/server/integrations/d1-audience'
+  );
+  if (isD1AudienceOnly()) {
+    const shopCounts = await d1CountNewSubscribersPerShop(
+      dayStart.toISOString(),
+      dayEnd.toISOString(),
+    );
+    for (const { shop_domain, count } of shopCounts) {
+      if (!shop_domain || count <= 0) {
+        continue;
+      }
+      await sql`
+        UPDATE merchant_daily_stats
+        SET new_subscribers = ${count}, updated_at = NOW()
+        WHERE shop_domain = ${shop_domain} AND stat_date = ${statDate}::date
+      `;
+    }
+  }
+
   return {
     statDate,
     shopsUpdated: rows.length,
@@ -3575,7 +3692,8 @@ export const runRetentionMaintenance = async () => {
   const pixelArchive = await archiveOldPixelEvents(14, 2000);
 
   const { pruneD1TrackingEvents, isD1EventsEnabled } = await import('@/lib/server/integrations/d1-events');
-  const d1Prune = isD1EventsEnabled() ? await pruneD1TrackingEvents(14, 2000) : null;
+  // Pass undefined so the env-configured D1_EVENTS_RETENTION_DAYS applies.
+  const d1Prune = isD1EventsEnabled() ? await pruneD1TrackingEvents(undefined, 2000) : null;
   const campaignMediaPrune = await pruneUnusedCampaignDeviceImages(30);
 
   return {
@@ -4011,23 +4129,57 @@ export const listDueAutomationJobs = async (limit = 100, shardCount = 1, shardIn
       )
   `;
 
-  const rows = await sql`
-    SELECT j.id, j.shop_domain, j.rule_key, j.token_id, j.subscriber_id, j.payload, t.fcm_token
-    FROM automation_jobs j
-    LEFT JOIN subscriber_tokens t ON t.id = j.token_id
-    WHERE j.status = 'pending'
-      AND j.due_at <= NOW()
-      AND (
-        j.queue_enqueued_at IS NULL
-        OR j.due_at <= NOW() - INTERVAL '90 seconds'
-      )
-      AND (
-        ${safeShardCount} = 1
-        OR MOD(ABS(hashtext(j.id)), ${safeShardCount}) = ${safeShardIndex}
-      )
-    ORDER BY j.due_at ASC
-    LIMIT ${limit}
-  `;
+  const { isD1AudienceReadActive, d1GetFcmTokensByIds } = await import(
+    '@/lib/server/integrations/d1-audience'
+  );
+  const readActive = isD1AudienceReadActive();
+
+  const rows = readActive
+    ? await sql`
+      SELECT j.id, j.shop_domain, j.rule_key, j.token_id, j.subscriber_id, j.payload
+      FROM automation_jobs j
+      WHERE j.status = 'pending'
+        AND j.due_at <= NOW()
+        AND (
+          j.queue_enqueued_at IS NULL
+          OR j.due_at <= NOW() - INTERVAL '90 seconds'
+        )
+        AND (
+          ${safeShardCount} = 1
+          OR MOD(ABS(hashtext(j.id)), ${safeShardCount}) = ${safeShardIndex}
+        )
+      ORDER BY j.due_at ASC
+      LIMIT ${limit}
+    `
+    : await sql`
+      SELECT j.id, j.shop_domain, j.rule_key, j.token_id, j.subscriber_id, j.payload, t.fcm_token
+      FROM automation_jobs j
+      LEFT JOIN subscriber_tokens t ON t.id = j.token_id
+      WHERE j.status = 'pending'
+        AND j.due_at <= NOW()
+        AND (
+          j.queue_enqueued_at IS NULL
+          OR j.due_at <= NOW() - INTERVAL '90 seconds'
+        )
+        AND (
+          ${safeShardCount} = 1
+          OR MOD(ABS(hashtext(j.id)), ${safeShardCount}) = ${safeShardIndex}
+        )
+      ORDER BY j.due_at ASC
+      LIMIT ${limit}
+    `;
+
+  if (readActive) {
+    // fcm_token is not consumed by the cron/queue path (processAutomationJob re-reads
+    // the token); enrich from D1 only to keep the returned shape identical.
+    const tokenIds = rows.map((row) => Number(row.token_id)).filter((id) => Number.isFinite(id));
+    const fcmMap =
+      tokenIds.length > 0 ? await d1GetFcmTokensByIds(tokenIds) : new Map<number, string>();
+    for (const row of rows) {
+      (row as { fcm_token: string | null }).fcm_token =
+        row.token_id != null ? fcmMap.get(Number(row.token_id)) ?? null : null;
+    }
+  }
 
   return rows as Array<{
     id: string;
@@ -4064,24 +4216,57 @@ export const listDueAutomationJobsByRule = async (
       )
   `;
 
-  const rows = await sql`
-    SELECT j.id, j.shop_domain, j.rule_key, j.token_id, j.subscriber_id, j.payload, t.fcm_token
-    FROM automation_jobs j
-    LEFT JOIN subscriber_tokens t ON t.id = j.token_id
-    WHERE j.status = 'pending'
-      AND j.rule_key = ${ruleKey}
-      AND j.due_at <= NOW()
-      AND (
-        j.queue_enqueued_at IS NULL
-        OR j.due_at <= NOW() - INTERVAL '90 seconds'
-      )
-      AND (
-        ${safeShardCount} = 1
-        OR MOD(ABS(hashtext(j.id)), ${safeShardCount}) = ${safeShardIndex}
-      )
-    ORDER BY j.due_at ASC
-    LIMIT ${limit}
-  `;
+  const { isD1AudienceReadActive, d1GetFcmTokensByIds } = await import(
+    '@/lib/server/integrations/d1-audience'
+  );
+  const readActive = isD1AudienceReadActive();
+
+  const rows = readActive
+    ? await sql`
+      SELECT j.id, j.shop_domain, j.rule_key, j.token_id, j.subscriber_id, j.payload
+      FROM automation_jobs j
+      WHERE j.status = 'pending'
+        AND j.rule_key = ${ruleKey}
+        AND j.due_at <= NOW()
+        AND (
+          j.queue_enqueued_at IS NULL
+          OR j.due_at <= NOW() - INTERVAL '90 seconds'
+        )
+        AND (
+          ${safeShardCount} = 1
+          OR MOD(ABS(hashtext(j.id)), ${safeShardCount}) = ${safeShardIndex}
+        )
+      ORDER BY j.due_at ASC
+      LIMIT ${limit}
+    `
+    : await sql`
+      SELECT j.id, j.shop_domain, j.rule_key, j.token_id, j.subscriber_id, j.payload, t.fcm_token
+      FROM automation_jobs j
+      LEFT JOIN subscriber_tokens t ON t.id = j.token_id
+      WHERE j.status = 'pending'
+        AND j.rule_key = ${ruleKey}
+        AND j.due_at <= NOW()
+        AND (
+          j.queue_enqueued_at IS NULL
+          OR j.due_at <= NOW() - INTERVAL '90 seconds'
+        )
+        AND (
+          ${safeShardCount} = 1
+          OR MOD(ABS(hashtext(j.id)), ${safeShardCount}) = ${safeShardIndex}
+        )
+      ORDER BY j.due_at ASC
+      LIMIT ${limit}
+    `;
+
+  if (readActive) {
+    const tokenIds = rows.map((row) => Number(row.token_id)).filter((id) => Number.isFinite(id));
+    const fcmMap =
+      tokenIds.length > 0 ? await d1GetFcmTokensByIds(tokenIds) : new Map<number, string>();
+    for (const row of rows) {
+      (row as { fcm_token: string | null }).fcm_token =
+        row.token_id != null ? fcmMap.get(Number(row.token_id)) ?? null : null;
+    }
+  }
 
   return rows as Array<{
     id: string;
@@ -4168,72 +4353,115 @@ export const processAutomationJob = async (jobId: string) => {
     return { processed: false };
   }
 
-  const tokenRows = await sql`
-    SELECT fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status, user_agent
-    FROM subscriber_tokens
-    WHERE id = ${claim.token_id ?? 0}
-    LIMIT 1
-  `;
-  let activeTokenRow = tokenRows[0];
+  // Audience reads route to D1 in read/d1_only (Neon fallback on error), run both
+  // in shadow, and stay on Neon otherwise. token_id/subscriber_id come from the
+  // Neon automation_jobs claim above; the token/subscriber rows live in D1.
+  const {
+    audienceRead: audRead,
+    d1GetTokenRowById,
+    d1GetBestTargetableTokenBySubscriberId,
+    d1GetBestTargetableTokenByExternalId,
+    d1GetSubscriberPlatformBrowserById,
+    d1GetSubscriberPlatformBrowserByExternalId,
+  } = await import('@/lib/server/integrations/d1-audience');
+  const tokenShadowKey = (row: any) =>
+    row
+      ? `${row.fcm_token ?? ''}|${row.token_type ?? ''}|${row.status ?? ''}|${row.vapid_endpoint ?? ''}`
+      : 'none';
+
+  let activeTokenRow: any = await audRead<any>({
+    label: 'processAutomationJob.tokenById',
+    key: tokenShadowKey,
+    neon: async () => {
+      const rows = await sql`
+        SELECT id, fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status, user_agent
+        FROM subscriber_tokens
+        WHERE id = ${claim.token_id ?? 0}
+        LIMIT 1
+      `;
+      return rows[0] ?? null;
+    },
+    d1: async () => (claim.token_id ? await d1GetTokenRowById(claim.token_id) : null),
+  });
   let token = String(activeTokenRow?.fcm_token ?? '');
   let tokenType = String(activeTokenRow?.token_type ?? 'fcm');
   let tokenStatus = String(activeTokenRow?.status ?? '');
   let deliveryTokenId = claim.token_id ?? null;
 
   if ((!token || tokenStatus !== 'active') && claim.subscriber_id) {
-    const fallbackTokenRows = await sql`
-      SELECT id, fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status, user_agent
-      FROM subscriber_tokens
-      WHERE shop_domain = ${claim.shop_domain}
-        AND subscriber_id = ${claim.subscriber_id}
-        AND status = 'active'
-        AND (
-          COALESCE(token_type, 'fcm') <> 'vapid'
-          OR (
-            COALESCE(vapid_endpoint, '') <> ''
-            AND COALESCE(vapid_p256dh, '') <> ''
-            AND COALESCE(vapid_auth, '') <> ''
-          )
-        )
-      ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC
-      LIMIT 1
-    `;
+    const fallbackRow: any = await audRead<any>({
+      label: 'processAutomationJob.tokenBySubscriber',
+      key: tokenShadowKey,
+      neon: async () => {
+        const rows = await sql`
+          SELECT id, fcm_token, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, status, user_agent
+          FROM subscriber_tokens
+          WHERE shop_domain = ${claim.shop_domain}
+            AND subscriber_id = ${claim.subscriber_id}
+            AND status = 'active'
+            AND (
+              COALESCE(token_type, 'fcm') <> 'vapid'
+              OR (
+                COALESCE(vapid_endpoint, '') <> ''
+                AND COALESCE(vapid_p256dh, '') <> ''
+                AND COALESCE(vapid_auth, '') <> ''
+              )
+            )
+          ORDER BY last_seen_at DESC NULLS LAST, updated_at DESC
+          LIMIT 1
+        `;
+        return rows[0] ?? null;
+      },
+      d1: async () =>
+        claim.subscriber_id
+          ? await d1GetBestTargetableTokenBySubscriberId(claim.shop_domain, claim.subscriber_id)
+          : null,
+    });
 
-    if (fallbackTokenRows[0]) {
-      activeTokenRow = fallbackTokenRows[0];
+    if (fallbackRow) {
+      activeTokenRow = fallbackRow;
       token = String(activeTokenRow?.fcm_token ?? '');
       tokenType = String(activeTokenRow?.token_type ?? 'fcm');
       tokenStatus = String(activeTokenRow?.status ?? '');
-      deliveryTokenId = Number(fallbackTokenRows[0]?.id ?? 0) || deliveryTokenId;
+      deliveryTokenId = Number(fallbackRow?.id ?? 0) || deliveryTokenId;
     }
   }
 
   if ((!token || tokenStatus !== 'active') && claim.payload?.externalId) {
-    const fallbackByExternalRows = await sql`
-      SELECT t.id, t.fcm_token, t.token_type, t.vapid_endpoint, t.vapid_p256dh, t.vapid_auth, t.status, t.user_agent
-      FROM subscriber_tokens t
-      JOIN subscribers s ON s.id = t.subscriber_id
-      WHERE t.shop_domain = ${claim.shop_domain}
-        AND s.external_id = ${String(claim.payload.externalId)}
-        AND t.status = 'active'
-        AND (
-          COALESCE(t.token_type, 'fcm') <> 'vapid'
-          OR (
-            COALESCE(t.vapid_endpoint, '') <> ''
-            AND COALESCE(t.vapid_p256dh, '') <> ''
-            AND COALESCE(t.vapid_auth, '') <> ''
-          )
-        )
-      ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC
-      LIMIT 1
-    `;
+    const externalId = String(claim.payload.externalId);
+    const fallbackRow: any = await audRead<any>({
+      label: 'processAutomationJob.tokenByExternal',
+      key: tokenShadowKey,
+      neon: async () => {
+        const rows = await sql`
+          SELECT t.id, t.fcm_token, t.token_type, t.vapid_endpoint, t.vapid_p256dh, t.vapid_auth, t.status, t.user_agent
+          FROM subscriber_tokens t
+          JOIN subscribers s ON s.id = t.subscriber_id
+          WHERE t.shop_domain = ${claim.shop_domain}
+            AND s.external_id = ${externalId}
+            AND t.status = 'active'
+            AND (
+              COALESCE(t.token_type, 'fcm') <> 'vapid'
+              OR (
+                COALESCE(t.vapid_endpoint, '') <> ''
+                AND COALESCE(t.vapid_p256dh, '') <> ''
+                AND COALESCE(t.vapid_auth, '') <> ''
+              )
+            )
+          ORDER BY t.last_seen_at DESC NULLS LAST, t.updated_at DESC
+          LIMIT 1
+        `;
+        return rows[0] ?? null;
+      },
+      d1: async () => await d1GetBestTargetableTokenByExternalId(claim.shop_domain, externalId),
+    });
 
-    if (fallbackByExternalRows[0]) {
-      activeTokenRow = fallbackByExternalRows[0];
+    if (fallbackRow) {
+      activeTokenRow = fallbackRow;
       token = String(activeTokenRow?.fcm_token ?? '');
       tokenType = String(activeTokenRow?.token_type ?? 'fcm');
       tokenStatus = String(activeTokenRow?.status ?? '');
-      deliveryTokenId = Number(fallbackByExternalRows[0]?.id ?? 0) || deliveryTokenId;
+      deliveryTokenId = Number(fallbackRow?.id ?? 0) || deliveryTokenId;
     }
   }
 
@@ -4275,24 +4503,52 @@ export const processAutomationJob = async (jobId: string) => {
     let subscriberBrowser: string | null = null;
 
     if (claim.subscriber_id) {
-      const subscriberRows = await sql`
-        SELECT platform, browser
-        FROM subscribers
-        WHERE id = ${claim.subscriber_id}
-        LIMIT 1
-      `;
-      subscriberPlatform = subscriberRows[0]?.platform == null ? null : String(subscriberRows[0].platform);
-      subscriberBrowser = subscriberRows[0]?.browser == null ? null : String(subscriberRows[0].browser);
+      const pb = await audRead<{ platform: string | null; browser: string | null } | null>({
+        label: 'processAutomationJob.subscriberById',
+        key: (r) => `${r?.platform ?? ''}|${r?.browser ?? ''}`,
+        neon: async () => {
+          const rows = await sql`
+            SELECT platform, browser
+            FROM subscribers
+            WHERE id = ${claim.subscriber_id}
+            LIMIT 1
+          `;
+          return rows[0]
+            ? {
+                platform: rows[0].platform == null ? null : String(rows[0].platform),
+                browser: rows[0].browser == null ? null : String(rows[0].browser),
+              }
+            : null;
+        },
+        d1: async () =>
+          claim.subscriber_id ? await d1GetSubscriberPlatformBrowserById(claim.subscriber_id) : null,
+      });
+      subscriberPlatform = pb?.platform ?? null;
+      subscriberBrowser = pb?.browser ?? null;
     } else if (payload.externalId) {
-      const subscriberRows = await sql`
-        SELECT platform, browser
-        FROM subscribers
-        WHERE shop_domain = ${claim.shop_domain}
-          AND external_id = ${String(payload.externalId)}
-        LIMIT 1
-      `;
-      subscriberPlatform = subscriberRows[0]?.platform == null ? null : String(subscriberRows[0].platform);
-      subscriberBrowser = subscriberRows[0]?.browser == null ? null : String(subscriberRows[0].browser);
+      const externalId = String(payload.externalId);
+      const pb = await audRead<{ platform: string | null; browser: string | null } | null>({
+        label: 'processAutomationJob.subscriberByExternal',
+        key: (r) => `${r?.platform ?? ''}|${r?.browser ?? ''}`,
+        neon: async () => {
+          const rows = await sql`
+            SELECT platform, browser
+            FROM subscribers
+            WHERE shop_domain = ${claim.shop_domain}
+              AND external_id = ${externalId}
+            LIMIT 1
+          `;
+          return rows[0]
+            ? {
+                platform: rows[0].platform == null ? null : String(rows[0].platform),
+                browser: rows[0].browser == null ? null : String(rows[0].browser),
+              }
+            : null;
+        },
+        d1: async () => await d1GetSubscriberPlatformBrowserByExternalId(claim.shop_domain, externalId),
+      });
+      subscriberPlatform = pb?.platform ?? null;
+      subscriberBrowser = pb?.browser ?? null;
     }
 
     const ruleRows = await sql`
@@ -5993,17 +6249,29 @@ export const upsertShopifyOrderEvent = async (input: UpsertShopifyOrderEventInpu
   const sql = getNeonSql();
   await ensureMerchant(input.shopDomain);
 
-  const subscriberRows = input.externalId
-    ? await sql`
-      SELECT id
-      FROM subscribers
-      WHERE shop_domain = ${input.shopDomain}
-        AND external_id = ${input.externalId}
-      LIMIT 1
-    `
-    : [];
-
-  const subscriberId = subscriberRows[0]?.id ? Number(subscriberRows[0].id) : null;
+  const subscriberId = input.externalId
+    ? await (async () => {
+        const { audienceRead, d1GetSubscriberIdByExternalId } = await import(
+          '@/lib/server/integrations/d1-audience'
+        );
+        return audienceRead<number | null>({
+          label: 'upsertShopifyOrderEvent.subscriberId',
+          key: (v) => String(v ?? 'null'),
+          neon: async () => {
+            const rows = await sql`
+              SELECT id
+              FROM subscribers
+              WHERE shop_domain = ${input.shopDomain}
+                AND external_id = ${input.externalId}
+              LIMIT 1
+            `;
+            return rows[0]?.id ? Number(rows[0].id) : null;
+          },
+          d1: async () =>
+            d1GetSubscriberIdByExternalId(input.shopDomain, String(input.externalId)),
+        });
+      })()
+    : null;
   const createdAt = input.createdAt ? new Date(input.createdAt) : new Date();
 
   const orderRows = await sql`
@@ -7245,6 +7513,242 @@ export const getMerchantCapabilitySnapshot = async (shopDomain: string) => {
   };
 };
 
+/** Retry a D1 write a few times to ride out transient blips before we buffer. */
+const withD1WriteRetries = async <T>(fn: () => Promise<T>, attempts = 3): Promise<T> => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError;
+};
+
+/**
+ * Zero-loss safety net for d1_only. When the authoritative D1 token write fails
+ * (D1 outage/blip), the full payload is durably captured in Neon so the cron
+ * reconciler can replay it into D1. Deduped on (shop_domain, fcm_token) so repeat
+ * attempts refresh the same row instead of piling up.
+ */
+const enqueueAudienceOutbox = async (input: UpsertTokenInput) => {
+  const sql = getNeonSql();
+  const payload = JSON.stringify(input);
+  await sql`
+    INSERT INTO d1_audience_outbox (shop_domain, external_id, fcm_token, payload)
+    VALUES (${input.shopDomain}, ${input.externalId}, ${input.token}, ${payload}::jsonb)
+    ON CONFLICT (shop_domain, fcm_token)
+    DO UPDATE SET
+      payload = EXCLUDED.payload,
+      external_id = EXCLUDED.external_id,
+      updated_at = NOW()
+  `;
+};
+
+/**
+ * Enqueue the welcome automation for a genuinely new token. Extracted so both the
+ * live token write and the outbox reconciler trigger it identically. The existing
+ * job/delivery dedupe below makes it safe to call more than once for the same
+ * subscriber (idempotent).
+ */
+const maybeEnqueueWelcomeAutomation = async (params: {
+  shopDomain: string;
+  externalId: string;
+  subscriberId: number;
+  tokenId: number;
+  tokenWasInserted: boolean;
+}) => {
+  const { shopDomain, externalId, subscriberId, tokenId, tokenWasInserted } = params;
+  const sql = getNeonSql();
+
+  const welcomeRuleRows = await sql`
+    SELECT enabled, config
+    FROM automation_rules
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+    LIMIT 1
+  `;
+
+  if (!(Boolean(welcomeRuleRows[0]?.enabled) && tokenWasInserted)) {
+    return;
+  }
+
+  const existingWelcomeJobRows = await sql`
+    SELECT id
+    FROM automation_jobs
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+      AND payload ->> 'externalId' = ${externalId}
+      AND status IN ('pending', 'processing', 'sent')
+    LIMIT 1
+  `;
+
+  const existingWelcomeDeliveryRows = await sql`
+    SELECT id
+    FROM automation_deliveries
+    WHERE shop_domain = ${shopDomain}
+      AND rule_key = 'welcome_subscriber'
+      AND external_id = ${externalId}
+    LIMIT 1
+  `;
+
+  if (existingWelcomeJobRows.length > 0 || existingWelcomeDeliveryRows.length > 0) {
+    return;
+  }
+
+  const welcomeConfig = parseWelcomeRuleConfig(welcomeRuleRows[0]?.config ?? null);
+  const now = Date.now();
+  const immediateWelcomeJobIds: string[] = [];
+
+  for (const stepKey of Object.keys(welcomeConfig.steps) as WelcomeStepKey[]) {
+    const step = welcomeConfig.steps[stepKey];
+    if (!step.enabled) {
+      continue;
+    }
+
+    // Small scheduler-boundary compensation so minute-level cron polling does
+    // not systematically deliver delayed reminders one minute late.
+    const adjustedDelayMs = step.delayMinutes > 0
+      ? Math.max(0, step.delayMinutes * 60_000 - 45_000)
+      : 0;
+    const dueAt = new Date(now + adjustedDelayMs);
+
+    const jobId = await enqueueAutomationJob({
+      shopDomain,
+      ruleKey: 'welcome_subscriber',
+      tokenId,
+      subscriberId,
+      dedupeKey: `welcome:${shopDomain}:external:${externalId}:${stepKey}`,
+      dueAt,
+      payload: {
+        title: step.title,
+        body: step.body,
+        targetUrl: step.targetUrl ?? null,
+        iconUrl: step.iconUrl ?? null,
+        imageUrl: step.imageUrl ?? null,
+        windowsImageUrl: step.windowsImageUrl ?? null,
+        macosImageUrl: step.macosImageUrl ?? null,
+        androidImageUrl: step.androidImageUrl ?? null,
+        metadata: {
+          stepKey,
+          actionButtons: step.actionButtons ?? [],
+        },
+        campaignLabel: `welcome_subscriber:${stepKey}`,
+        ruleKey: 'welcome_subscriber',
+        externalId,
+        triggeredAt: new Date().toISOString(),
+      },
+    });
+
+    if (step.delayMinutes <= 0 && jobId) {
+      immediateWelcomeJobIds.push(jobId);
+    }
+  }
+
+  if (immediateWelcomeJobIds.length > 0) {
+    await Promise.all(immediateWelcomeJobIds.map((jobId) => processAutomationJob(jobId)));
+  }
+};
+
+/**
+ * Drain the d1_only zero-loss outbox: replay each buffered token into D1 (which
+ * assigns the id, avoiding any Neon/D1 id-sequence collision), fire the welcome
+ * automation if it was a new token, then delete the row. Runs every cron tick and
+ * is a no-op (single count query) when the outbox is empty. Returns counts so the
+ * tick can stay awake while rows remain.
+ */
+export const reconcileAudienceOutbox = async (limit = 500) => {
+  const { isD1AudienceWriteEnabled, d1UpsertAudienceAuthoritative } = await import(
+    '@/lib/server/integrations/d1-audience'
+  );
+  // Only replayable when D1 is a write target. Rows stay safely buffered otherwise.
+  if (!isD1AudienceWriteEnabled()) {
+    return { processed: 0, failed: 0, remaining: 0, skipped: true };
+  }
+
+  await ensureSchema();
+  const sql = getNeonSql();
+
+  const rows = await sql`
+    SELECT id, payload
+    FROM d1_audience_outbox
+    ORDER BY created_at ASC
+    LIMIT ${limit}
+  `;
+
+  if (rows.length === 0) {
+    return { processed: 0, failed: 0, remaining: 0 };
+  }
+
+  let processed = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    const input = row.payload as UpsertTokenInput;
+    const serializedDeviceContext = input.deviceContext ? JSON.stringify(input.deviceContext) : null;
+    try {
+      const result = await d1UpsertAudienceAuthoritative({
+        shopDomain: input.shopDomain,
+        externalId: input.externalId,
+        browser: input.browser ?? null,
+        platform: input.platform ?? null,
+        locale: input.locale ?? null,
+        country: input.country ?? null,
+        city: input.city ?? null,
+        deviceContext: serializedDeviceContext,
+        token: input.token,
+        userAgent: input.userAgent ?? null,
+        tokenType: input.tokenType ?? 'fcm',
+        vapidEndpoint: input.vapidEndpoint ?? null,
+        vapidP256dh: input.vapidP256dh ?? null,
+        vapidAuth: input.vapidAuth ?? null,
+      });
+      await maybeEnqueueWelcomeAutomation({
+        shopDomain: input.shopDomain,
+        externalId: input.externalId,
+        subscriberId: result.subscriberId,
+        tokenId: result.tokenId,
+        tokenWasInserted: result.tokenWasInserted,
+      });
+      await sql`DELETE FROM d1_audience_outbox WHERE id = ${row.id}`;
+      processed += 1;
+    } catch (error) {
+      failed += 1;
+      const message = error instanceof Error ? error.message : String(error ?? '');
+      await sql`
+        UPDATE d1_audience_outbox
+        SET attempts = attempts + 1, last_error = ${message}, updated_at = NOW()
+        WHERE id = ${row.id}
+      `;
+    }
+  }
+
+  const remainingRows = await sql`SELECT COUNT(*)::int AS c FROM d1_audience_outbox`;
+  return { processed, failed, remaining: Number(remainingRows[0]?.c ?? 0) };
+};
+
+/** Health/monitoring view of the zero-loss outbox — should read 0 pending. */
+export const getAudienceOutboxStatus = async () => {
+  await ensureSchema();
+  const sql = getNeonSql();
+  const rows = await sql`
+    SELECT
+      COUNT(*)::int AS pending,
+      COALESCE(MAX(attempts), 0)::int AS max_attempts,
+      MIN(created_at) AS oldest_created_at
+    FROM d1_audience_outbox
+  `;
+  return {
+    pending: Number(rows[0]?.pending ?? 0),
+    maxAttempts: Number(rows[0]?.max_attempts ?? 0),
+    oldestCreatedAt: rows[0]?.oldest_created_at ?? null,
+  };
+};
+
 export const upsertSubscriberToken = async (input: UpsertTokenInput) => {
   await ensureSchema();
   const sql = getNeonSql();
@@ -7253,73 +7757,127 @@ export const upsertSubscriberToken = async (input: UpsertTokenInput) => {
   await ensureMerchant(input.shopDomain);
   await ensureAutomationRules(input.shopDomain);
 
-  const subscriberRows = await sql`
-    INSERT INTO subscribers (shop_domain, external_id, browser, platform, locale, country, city, device_context, last_seen_at)
-    VALUES (
-      ${input.shopDomain},
-      ${input.externalId},
-      ${input.browser ?? null},
-      ${input.platform ?? null},
-      ${input.locale ?? null},
-      ${input.country ?? null},
-      ${input.city ?? null},
-      ${serializedDeviceContext}::jsonb,
-      NOW()
-    )
-    ON CONFLICT (shop_domain, external_id)
-    DO UPDATE SET
-      browser = EXCLUDED.browser,
-      platform = EXCLUDED.platform,
-      locale = EXCLUDED.locale,
-      country = COALESCE(NULLIF(EXCLUDED.country, ''), subscribers.country),
-      city = COALESCE(EXCLUDED.city, subscribers.city),
-      device_context = COALESCE(EXCLUDED.device_context, subscribers.device_context),
-      last_seen_at = NOW()
-    RETURNING id
-  `;
+  const {
+    isD1AudienceOnly,
+    isD1AudienceWriteEnabled,
+    d1MirrorSubscriber,
+    d1MirrorToken,
+    d1UpsertAudienceAuthoritative,
+  } = await import('@/lib/server/integrations/d1-audience');
 
-  const subscriberId = Number(subscriberRows[0]?.id);
+  let subscriberId: number;
+  let tokenId: number;
+  let tokenWasInserted: boolean;
 
-  const tokenRows = await sql`
-    INSERT INTO subscriber_tokens (shop_domain, subscriber_id, fcm_token, user_agent, status, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, updated_at, last_seen_at)
-    VALUES (
-      ${input.shopDomain},
-      ${subscriberId},
-      ${input.token},
-      ${input.userAgent ?? null},
-      'active',
-      ${input.tokenType ?? 'fcm'},
-      ${input.vapidEndpoint ?? null},
-      ${input.vapidP256dh ?? null},
-      ${input.vapidAuth ?? null},
-      NOW(),
-      NOW()
-    )
-    ON CONFLICT (shop_domain, fcm_token)
-    DO UPDATE SET
-      subscriber_id = EXCLUDED.subscriber_id,
-      user_agent = EXCLUDED.user_agent,
-      token_type = EXCLUDED.token_type,
-      vapid_endpoint = COALESCE(EXCLUDED.vapid_endpoint, subscriber_tokens.vapid_endpoint),
-      vapid_p256dh = COALESCE(EXCLUDED.vapid_p256dh, subscriber_tokens.vapid_p256dh),
-      vapid_auth = COALESCE(EXCLUDED.vapid_auth, subscriber_tokens.vapid_auth),
-      status = 'active',
-      updated_at = NOW(),
-      last_seen_at = NOW()
-    RETURNING id, (xmax = 0) AS was_inserted
-  `;
+  if (isD1AudienceOnly()) {
+    // d1_only: D1 is the sole store and assigns the ids. Neon audience tables are
+    // no longer written. We retry a few times to ride out transient D1 blips; if
+    // it still fails we durably buffer the payload to the Neon outbox so the cron
+    // reconciler can replay it into D1 — a token is NEVER lost, even during a D1
+    // outage.
+    try {
+      const result = await withD1WriteRetries(() =>
+        d1UpsertAudienceAuthoritative({
+          shopDomain: input.shopDomain,
+          externalId: input.externalId,
+          browser: input.browser ?? null,
+          platform: input.platform ?? null,
+          locale: input.locale ?? null,
+          country: input.country ?? null,
+          city: input.city ?? null,
+          deviceContext: serializedDeviceContext,
+          token: input.token,
+          userAgent: input.userAgent ?? null,
+          tokenType: input.tokenType ?? 'fcm',
+          vapidEndpoint: input.vapidEndpoint ?? null,
+          vapidP256dh: input.vapidP256dh ?? null,
+          vapidAuth: input.vapidAuth ?? null,
+        }),
+      );
+      subscriberId = result.subscriberId;
+      tokenId = result.tokenId;
+      tokenWasInserted = result.tokenWasInserted;
+    } catch (d1Error) {
+      await enqueueAudienceOutbox(input);
+      // Wake the cron promptly so the reconciler drains the buffered token within a
+      // tick instead of waiting out the idle sleep window.
+      try {
+        const { bumpCronWakeNow } = await import('@/lib/server/cron/cron-idle');
+        void bumpCronWakeNow();
+      } catch {
+        // best-effort wake
+      }
+      console.error(
+        '[audience] d1_only token write failed; buffered to outbox for replay',
+        d1Error instanceof Error ? d1Error.message : d1Error,
+      );
+      const { invalidateShopDashboardCaches } = await import('@/lib/server/cache/api-kv-cache');
+      void invalidateShopDashboardCaches(input.shopDomain);
+      // The token is safely captured; ids will be assigned by D1 on replay.
+      return { subscriberId: 0, tokenId: 0, buffered: true };
+    }
+  } else {
+    const subscriberRows = await sql`
+      INSERT INTO subscribers (shop_domain, external_id, browser, platform, locale, country, city, device_context, last_seen_at)
+      VALUES (
+        ${input.shopDomain},
+        ${input.externalId},
+        ${input.browser ?? null},
+        ${input.platform ?? null},
+        ${input.locale ?? null},
+        ${input.country ?? null},
+        ${input.city ?? null},
+        ${serializedDeviceContext}::jsonb,
+        NOW()
+      )
+      ON CONFLICT (shop_domain, external_id)
+      DO UPDATE SET
+        browser = EXCLUDED.browser,
+        platform = EXCLUDED.platform,
+        locale = EXCLUDED.locale,
+        country = COALESCE(NULLIF(EXCLUDED.country, ''), subscribers.country),
+        city = COALESCE(EXCLUDED.city, subscribers.city),
+        device_context = COALESCE(EXCLUDED.device_context, subscribers.device_context),
+        last_seen_at = NOW()
+      RETURNING id
+    `;
 
-  const tokenId = Number(tokenRows[0]?.id);
-  const tokenWasInserted = Boolean(tokenRows[0]?.was_inserted);
+    subscriberId = Number(subscriberRows[0]?.id);
 
-  // Stage-1 audience dual-write: mirror the Neon rows into D1 using the ids Neon
-  // just assigned. No-op (instant return) when D1_AUDIENCE_MODE is off.
-  {
-    const {
-      isD1AudienceWriteEnabled,
-      d1MirrorSubscriber,
-      d1MirrorToken,
-    } = await import('@/lib/server/integrations/d1-audience');
+    const tokenRows = await sql`
+      INSERT INTO subscriber_tokens (shop_domain, subscriber_id, fcm_token, user_agent, status, token_type, vapid_endpoint, vapid_p256dh, vapid_auth, updated_at, last_seen_at)
+      VALUES (
+        ${input.shopDomain},
+        ${subscriberId},
+        ${input.token},
+        ${input.userAgent ?? null},
+        'active',
+        ${input.tokenType ?? 'fcm'},
+        ${input.vapidEndpoint ?? null},
+        ${input.vapidP256dh ?? null},
+        ${input.vapidAuth ?? null},
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (shop_domain, fcm_token)
+      DO UPDATE SET
+        subscriber_id = EXCLUDED.subscriber_id,
+        user_agent = EXCLUDED.user_agent,
+        token_type = EXCLUDED.token_type,
+        vapid_endpoint = COALESCE(EXCLUDED.vapid_endpoint, subscriber_tokens.vapid_endpoint),
+        vapid_p256dh = COALESCE(EXCLUDED.vapid_p256dh, subscriber_tokens.vapid_p256dh),
+        vapid_auth = COALESCE(EXCLUDED.vapid_auth, subscriber_tokens.vapid_auth),
+        status = 'active',
+        updated_at = NOW(),
+        last_seen_at = NOW()
+      RETURNING id, (xmax = 0) AS was_inserted
+    `;
+
+    tokenId = Number(tokenRows[0]?.id);
+    tokenWasInserted = Boolean(tokenRows[0]?.was_inserted);
+
+    // Stage-1/2 audience dual-write: mirror the Neon rows into D1 using the ids
+    // Neon just assigned. No-op (instant return) when D1_AUDIENCE_MODE is off.
     if (isD1AudienceWriteEnabled()) {
       await d1MirrorSubscriber({
         id: subscriberId,
@@ -7347,94 +7905,13 @@ export const upsertSubscriberToken = async (input: UpsertTokenInput) => {
     }
   }
 
-  const welcomeRuleRows = await sql`
-    SELECT enabled, config
-    FROM automation_rules
-    WHERE shop_domain = ${input.shopDomain}
-      AND rule_key = 'welcome_subscriber'
-    LIMIT 1
-  `;
-
-  if (Boolean(welcomeRuleRows[0]?.enabled) && tokenWasInserted) {
-    const existingWelcomeJobRows = await sql`
-      SELECT id
-      FROM automation_jobs
-      WHERE shop_domain = ${input.shopDomain}
-        AND rule_key = 'welcome_subscriber'
-        AND payload ->> 'externalId' = ${input.externalId}
-        AND status IN ('pending', 'processing', 'sent')
-      LIMIT 1
-    `;
-
-    const existingWelcomeDeliveryRows = await sql`
-      SELECT id
-      FROM automation_deliveries
-      WHERE shop_domain = ${input.shopDomain}
-        AND rule_key = 'welcome_subscriber'
-        AND external_id = ${input.externalId}
-      LIMIT 1
-    `;
-
-    if (existingWelcomeJobRows.length > 0 || existingWelcomeDeliveryRows.length > 0) {
-      return {
-        subscriberId,
-        tokenId,
-      };
-    }
-
-    const welcomeConfig = parseWelcomeRuleConfig(welcomeRuleRows[0]?.config ?? null);
-    const now = Date.now();
-    const immediateWelcomeJobIds: string[] = [];
-
-    for (const stepKey of Object.keys(welcomeConfig.steps) as WelcomeStepKey[]) {
-      const step = welcomeConfig.steps[stepKey];
-      if (!step.enabled) {
-        continue;
-      }
-
-      // Small scheduler-boundary compensation so minute-level cron polling does
-      // not systematically deliver delayed reminders one minute late.
-      const adjustedDelayMs = step.delayMinutes > 0
-        ? Math.max(0, step.delayMinutes * 60_000 - 45_000)
-        : 0;
-      const dueAt = new Date(now + adjustedDelayMs);
-
-      const jobId = await enqueueAutomationJob({
-        shopDomain: input.shopDomain,
-        ruleKey: 'welcome_subscriber',
-        tokenId,
-        subscriberId,
-        dedupeKey: `welcome:${input.shopDomain}:external:${input.externalId}:${stepKey}`,
-        dueAt,
-        payload: {
-          title: step.title,
-          body: step.body,
-          targetUrl: step.targetUrl ?? null,
-          iconUrl: step.iconUrl ?? null,
-          imageUrl: step.imageUrl ?? null,
-          windowsImageUrl: step.windowsImageUrl ?? null,
-          macosImageUrl: step.macosImageUrl ?? null,
-          androidImageUrl: step.androidImageUrl ?? null,
-          metadata: {
-            stepKey,
-            actionButtons: step.actionButtons ?? [],
-          },
-          campaignLabel: `welcome_subscriber:${stepKey}`,
-          ruleKey: 'welcome_subscriber',
-          externalId: input.externalId,
-          triggeredAt: new Date().toISOString(),
-        },
-      });
-
-      if (step.delayMinutes <= 0 && jobId) {
-        immediateWelcomeJobIds.push(jobId);
-      }
-    }
-
-    if (immediateWelcomeJobIds.length > 0) {
-      await Promise.all(immediateWelcomeJobIds.map((jobId) => processAutomationJob(jobId)));
-    }
-  }
+  await maybeEnqueueWelcomeAutomation({
+    shopDomain: input.shopDomain,
+    externalId: input.externalId,
+    subscriberId,
+    tokenId,
+    tokenWasInserted,
+  });
 
   const { invalidateShopDashboardCaches } = await import('@/lib/server/cache/api-kv-cache');
   void invalidateShopDashboardCaches(input.shopDomain);
@@ -7488,59 +7965,84 @@ export const recordIosHomeScreenConfirmed = async (input: RecordIosHomeScreenInp
 
   await ensureMerchant(input.shopDomain);
 
-  const subscriberRows = await sql`
-    INSERT INTO subscribers (
-      shop_domain,
-      external_id,
-      browser,
-      platform,
-      locale,
-      country,
-      city,
-      device_context,
-      last_seen_at,
-      ios_home_screen_confirmed_at,
-      ios_home_screen_last_seen_at
-    )
-    VALUES (
-      ${input.shopDomain},
-      ${input.externalId},
-      ${input.browser ?? null},
-      ${input.platform ?? 'ios'},
-      ${input.locale ?? null},
-      ${input.country ?? null},
-      ${input.city ?? null},
-      ${serializedDeviceContext}::jsonb,
-      NOW(),
-      NOW(),
-      NOW()
-    )
-    ON CONFLICT (shop_domain, external_id)
-    DO UPDATE SET
-      browser = COALESCE(EXCLUDED.browser, subscribers.browser),
-      platform = COALESCE(EXCLUDED.platform, subscribers.platform),
-      locale = COALESCE(EXCLUDED.locale, subscribers.locale),
-      country = COALESCE(EXCLUDED.country, subscribers.country),
-      city = COALESCE(EXCLUDED.city, subscribers.city),
-      device_context = COALESCE(EXCLUDED.device_context, subscribers.device_context),
-      last_seen_at = NOW(),
-      ios_home_screen_confirmed_at = COALESCE(subscribers.ios_home_screen_confirmed_at, NOW()),
-      ios_home_screen_last_seen_at = NOW()
-    RETURNING id, ios_home_screen_confirmed_at, ios_home_screen_last_seen_at
-  `;
+  const {
+    isD1AudienceOnly,
+    isD1AudienceWriteEnabled,
+    d1MirrorSubscriber,
+    d1RecordIosHomeScreenConfirmedAuthoritative,
+  } = await import('@/lib/server/integrations/d1-audience');
 
-  const iosSubscriberId = Number(subscriberRows[0]?.id);
-  const iosConfirmedAt = subscriberRows[0]?.ios_home_screen_confirmed_at
-    ? String(subscriberRows[0].ios_home_screen_confirmed_at)
-    : null;
-  const iosLastSeenAt = subscriberRows[0]?.ios_home_screen_last_seen_at
-    ? String(subscriberRows[0].ios_home_screen_last_seen_at)
-    : null;
+  let iosSubscriberId: number;
+  let iosConfirmedAt: string | null;
+  let iosLastSeenAt: string | null;
 
-  {
-    const { isD1AudienceWriteEnabled, d1MirrorSubscriber } = await import(
-      '@/lib/server/integrations/d1-audience'
-    );
+  if (isD1AudienceOnly()) {
+    const nowIso = new Date().toISOString();
+    const result = await d1RecordIosHomeScreenConfirmedAuthoritative({
+      shopDomain: input.shopDomain,
+      externalId: input.externalId,
+      browser: input.browser ?? null,
+      platform: input.platform ?? 'ios',
+      locale: input.locale ?? null,
+      country: input.country ?? null,
+      city: input.city ?? null,
+      deviceContext: serializedDeviceContext,
+      confirmedAt: nowIso,
+      lastSeenAt: nowIso,
+    });
+    iosSubscriberId = result.subscriberId;
+    iosConfirmedAt = result.confirmedAt;
+    iosLastSeenAt = result.lastSeenAt;
+  } else {
+    const subscriberRows = await sql`
+      INSERT INTO subscribers (
+        shop_domain,
+        external_id,
+        browser,
+        platform,
+        locale,
+        country,
+        city,
+        device_context,
+        last_seen_at,
+        ios_home_screen_confirmed_at,
+        ios_home_screen_last_seen_at
+      )
+      VALUES (
+        ${input.shopDomain},
+        ${input.externalId},
+        ${input.browser ?? null},
+        ${input.platform ?? 'ios'},
+        ${input.locale ?? null},
+        ${input.country ?? null},
+        ${input.city ?? null},
+        ${serializedDeviceContext}::jsonb,
+        NOW(),
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (shop_domain, external_id)
+      DO UPDATE SET
+        browser = COALESCE(EXCLUDED.browser, subscribers.browser),
+        platform = COALESCE(EXCLUDED.platform, subscribers.platform),
+        locale = COALESCE(EXCLUDED.locale, subscribers.locale),
+        country = COALESCE(EXCLUDED.country, subscribers.country),
+        city = COALESCE(EXCLUDED.city, subscribers.city),
+        device_context = COALESCE(EXCLUDED.device_context, subscribers.device_context),
+        last_seen_at = NOW(),
+        ios_home_screen_confirmed_at = COALESCE(subscribers.ios_home_screen_confirmed_at, NOW()),
+        ios_home_screen_last_seen_at = NOW()
+      RETURNING id, ios_home_screen_confirmed_at, ios_home_screen_last_seen_at
+    `;
+
+    iosSubscriberId = Number(subscriberRows[0]?.id);
+    iosConfirmedAt = subscriberRows[0]?.ios_home_screen_confirmed_at
+      ? String(subscriberRows[0].ios_home_screen_confirmed_at)
+      : null;
+    iosLastSeenAt = subscriberRows[0]?.ios_home_screen_last_seen_at
+      ? String(subscriberRows[0].ios_home_screen_last_seen_at)
+      : null;
+
     if (isD1AudienceWriteEnabled()) {
       await d1MirrorSubscriber({
         id: iosSubscriberId,
@@ -7977,32 +8479,49 @@ export const getSubscriberBreakdown = async (shopDomain: string, limit = 8) => {
   const sql = getNeonSql();
   const safeLimit = Math.min(Math.max(limit, 1), 20);
 
-  const browsers = await sql`
-    SELECT
-      LOWER(COALESCE(NULLIF(browser, ''), NULLIF(device_context ->> 'browserName', ''), 'unknown')) AS name,
-      COUNT(*)::BIGINT AS value
-    FROM subscribers
-    WHERE shop_domain = ${shopDomain}
-    GROUP BY 1
-    ORDER BY 2 DESC
-    LIMIT ${safeLimit}
-  `;
+  const { audienceRead, d1GetSubscriberBreakdown } = await import(
+    '@/lib/server/integrations/d1-audience'
+  );
+  const shadowKey = (result: { browsers: Array<{ name: string; value: number }>; platforms: Array<{ name: string; value: number }> }) =>
+    JSON.stringify({
+      b: result.browsers.map((r) => `${r.name}:${r.value}`),
+      p: result.platforms.map((r) => `${r.name}:${r.value}`),
+    });
 
-  const platforms = await sql`
-    SELECT
-      LOWER(COALESCE(NULLIF(platform, ''), NULLIF(device_context ->> 'osName', ''), 'unknown')) AS name,
-      COUNT(*)::BIGINT AS value
-    FROM subscribers
-    WHERE shop_domain = ${shopDomain}
-    GROUP BY 1
-    ORDER BY 2 DESC
-    LIMIT ${safeLimit}
-  `;
-
-  return {
-    browsers: browsers.map((row) => ({ name: String(row.name), value: Number(row.value ?? 0) })),
-    platforms: platforms.map((row) => ({ name: String(row.name), value: Number(row.value ?? 0) })),
-  };
+  return audienceRead<{
+    browsers: Array<{ name: string; value: number }>;
+    platforms: Array<{ name: string; value: number }>;
+  }>({
+    label: 'getSubscriberBreakdown',
+    key: shadowKey,
+    neon: async () => {
+      const browsers = await sql`
+        SELECT
+          LOWER(COALESCE(NULLIF(browser, ''), NULLIF(device_context ->> 'browserName', ''), 'unknown')) AS name,
+          COUNT(*)::BIGINT AS value
+        FROM subscribers
+        WHERE shop_domain = ${shopDomain}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT ${safeLimit}
+      `;
+      const platforms = await sql`
+        SELECT
+          LOWER(COALESCE(NULLIF(platform, ''), NULLIF(device_context ->> 'osName', ''), 'unknown')) AS name,
+          COUNT(*)::BIGINT AS value
+        FROM subscribers
+        WHERE shop_domain = ${shopDomain}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT ${safeLimit}
+      `;
+      return {
+        browsers: browsers.map((row) => ({ name: String(row.name), value: Number(row.value ?? 0) })),
+        platforms: platforms.map((row) => ({ name: String(row.name), value: Number(row.value ?? 0) })),
+      };
+    },
+    d1: async () => d1GetSubscriberBreakdown(shopDomain, safeLimit),
+  });
 };
 
 export const getSubscriberLocationBreakdown = async (shopDomain: string, limit = 8) => {
@@ -8010,32 +8529,49 @@ export const getSubscriberLocationBreakdown = async (shopDomain: string, limit =
   const sql = getNeonSql();
   const safeLimit = Math.min(Math.max(limit, 1), 20);
 
-  const countries = await sql`
-    SELECT
-      COALESCE(NULLIF(country, ''), 'Unknown') AS name,
-      COUNT(*)::BIGINT AS value
-    FROM subscribers
-    WHERE shop_domain = ${shopDomain}
-    GROUP BY 1
-    ORDER BY 2 DESC
-    LIMIT ${safeLimit}
-  `;
+  const { audienceRead, d1GetSubscriberLocationBreakdown } = await import(
+    '@/lib/server/integrations/d1-audience'
+  );
+  const shadowKey = (result: { countries: Array<{ name: string; value: number }>; cities: Array<{ name: string; value: number }> }) =>
+    JSON.stringify({
+      c: result.countries.map((r) => `${r.name}:${r.value}`),
+      t: result.cities.map((r) => `${r.name}:${r.value}`),
+    });
 
-  const cities = await sql`
-    SELECT
-      COALESCE(NULLIF(city, ''), 'Unknown') AS name,
-      COUNT(*)::BIGINT AS value
-    FROM subscribers
-    WHERE shop_domain = ${shopDomain}
-    GROUP BY 1
-    ORDER BY 2 DESC
-    LIMIT ${safeLimit}
-  `;
-
-  return {
-    countries: countries.map((row) => ({ name: String(row.name), value: Number(row.value ?? 0) })),
-    cities: cities.map((row) => ({ name: String(row.name), value: Number(row.value ?? 0) })),
-  };
+  return audienceRead<{
+    countries: Array<{ name: string; value: number }>;
+    cities: Array<{ name: string; value: number }>;
+  }>({
+    label: 'getSubscriberLocationBreakdown',
+    key: shadowKey,
+    neon: async () => {
+      const countries = await sql`
+        SELECT
+          COALESCE(NULLIF(country, ''), 'Unknown') AS name,
+          COUNT(*)::BIGINT AS value
+        FROM subscribers
+        WHERE shop_domain = ${shopDomain}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT ${safeLimit}
+      `;
+      const cities = await sql`
+        SELECT
+          COALESCE(NULLIF(city, ''), 'Unknown') AS name,
+          COUNT(*)::BIGINT AS value
+        FROM subscribers
+        WHERE shop_domain = ${shopDomain}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT ${safeLimit}
+      `;
+      return {
+        countries: countries.map((row) => ({ name: String(row.name), value: Number(row.value ?? 0) })),
+        cities: cities.map((row) => ({ name: String(row.name), value: Number(row.value ?? 0) })),
+      };
+    },
+    d1: async () => d1GetSubscriberLocationBreakdown(shopDomain, safeLimit),
+  });
 };
 
 export const getSubscriberGrowth = async (
@@ -8046,16 +8582,25 @@ export const getSubscriberGrowth = async (
   await ensureSchema();
   const sql = getNeonSql();
 
+  const { isD1AudienceReadActive, d1GetEarliestSubscriberCreatedAt, d1GetSubscriberGrowthCounts } =
+    await import('@/lib/server/integrations/d1-audience');
+  const readActive = isD1AudienceReadActive();
+
   const end = to ?? new Date();
   let start = from ?? null;
 
   if (!start) {
-    const earliestRows = await sql`
-      SELECT MIN(created_at) AS earliest
-      FROM subscribers
-      WHERE shop_domain = ${shopDomain}
-    `;
-    const earliest = earliestRows[0]?.earliest;
+    let earliest: unknown;
+    if (readActive) {
+      earliest = await d1GetEarliestSubscriberCreatedAt(shopDomain);
+    } else {
+      const earliestRows = await sql`
+        SELECT MIN(created_at) AS earliest
+        FROM subscribers
+        WHERE shop_domain = ${shopDomain}
+      `;
+      earliest = earliestRows[0]?.earliest;
+    }
     start = earliest
       ? new Date(String(earliest))
       : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -8064,23 +8609,48 @@ export const getSubscriberGrowth = async (
   const rangeStart = start <= end ? start : end;
   const rangeEnd = start <= end ? end : start;
 
-  const rows = await sql`
-    SELECT
-      gs.day::date AS day,
-      COALESCE(COUNT(s.id), 0)::BIGINT AS subscribers
-    FROM generate_series(${rangeStart}::timestamptz, ${rangeEnd}::timestamptz, interval '1 day') AS gs(day)
-    LEFT JOIN subscribers s
-      ON s.shop_domain = ${shopDomain}
-      AND s.created_at >= gs.day
-      AND s.created_at < gs.day + interval '1 day'
-    GROUP BY gs.day
-    ORDER BY gs.day ASC
-  `;
+  let points: SubscriberGrowthPoint[];
 
-  const points: SubscriberGrowthPoint[] = rows.map((row) => ({
-    date: row?.day ? String(row.day) : '',
-    subscribers: Number(row?.subscribers ?? 0),
-  }));
+  if (readActive) {
+    // Bucket new subscribers by UTC calendar day in D1, then fill the full day
+    // range (including zero days) in app code to mirror generate_series.
+    const counts = await d1GetSubscriberGrowthCounts(
+      shopDomain,
+      rangeStart.toISOString(),
+      rangeEnd.toISOString(),
+    );
+    const byDay = new Map(counts.map((row) => [row.day, row.count]));
+    points = [];
+    const cursor = new Date(
+      Date.UTC(rangeStart.getUTCFullYear(), rangeStart.getUTCMonth(), rangeStart.getUTCDate()),
+    );
+    const endDay = new Date(
+      Date.UTC(rangeEnd.getUTCFullYear(), rangeEnd.getUTCMonth(), rangeEnd.getUTCDate()),
+    );
+    while (cursor <= endDay) {
+      const label = cursor.toISOString().slice(0, 10);
+      points.push({ date: label, subscribers: byDay.get(label) ?? 0 });
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+  } else {
+    const rows = await sql`
+      SELECT
+        gs.day::date AS day,
+        COALESCE(COUNT(s.id), 0)::BIGINT AS subscribers
+      FROM generate_series(${rangeStart}::timestamptz, ${rangeEnd}::timestamptz, interval '1 day') AS gs(day)
+      LEFT JOIN subscribers s
+        ON s.shop_domain = ${shopDomain}
+        AND s.created_at >= gs.day
+        AND s.created_at < gs.day + interval '1 day'
+      GROUP BY gs.day
+      ORDER BY gs.day ASC
+    `;
+
+    points = rows.map((row) => ({
+      date: row?.day ? String(row.day) : '',
+      subscribers: Number(row?.subscribers ?? 0),
+    }));
+  }
 
   return {
     from: rangeStart,
@@ -8366,12 +8936,25 @@ export const getAnalyticsStats = async (shopDomain: string, from?: Date | null, 
       WHERE shop_domain = ${shopDomain}
         AND clicked_at >= ${start} AND clicked_at <= ${end}
     `,
-    sql`
-      SELECT COUNT(*)::BIGINT AS count
-      FROM subscribers
-      WHERE shop_domain = ${shopDomain}
-        AND created_at >= ${start} AND created_at <= ${end}
-    `,
+    (async () => {
+      const { isD1AudienceReadActive, d1CountSubscribersCreatedBetween } = await import(
+        '@/lib/server/integrations/d1-audience'
+      );
+      if (isD1AudienceReadActive()) {
+        const count = await d1CountSubscribersCreatedBetween(
+          shopDomain,
+          start.toISOString(),
+          end.toISOString(),
+        );
+        return [{ count }];
+      }
+      return sql`
+        SELECT COUNT(*)::BIGINT AS count
+        FROM subscribers
+        WHERE shop_domain = ${shopDomain}
+          AND created_at >= ${start} AND created_at <= ${end}
+      `;
+    })(),
     sql`
       SELECT
         DATE(created_at AT TIME ZONE 'UTC')::TEXT AS date,
@@ -10089,16 +10672,28 @@ export const trackCampaignClick = async (input: TrackCampaignClickInput) => {
   const sql = getNeonSql();
   const normalizedExternalId = input.externalId?.trim() || null;
 
-  const subscriberRows = input.externalId
-    ? await sql`
-      SELECT id
-      FROM subscribers
-      WHERE shop_domain = ${input.shopDomain} AND external_id = ${input.externalId}
-      LIMIT 1
-    `
-    : [];
-
-  const subscriberId = subscriberRows[0]?.id ? Number(subscriberRows[0].id) : null;
+  const subscriberId = input.externalId
+    ? await (async () => {
+        const { audienceRead, d1GetSubscriberIdByExternalId } = await import(
+          '@/lib/server/integrations/d1-audience'
+        );
+        return audienceRead<number | null>({
+          label: 'trackCampaignClick.subscriberId',
+          key: (v) => String(v ?? 'null'),
+          neon: async () => {
+            const rows = await sql`
+              SELECT id
+              FROM subscribers
+              WHERE shop_domain = ${input.shopDomain} AND external_id = ${input.externalId}
+              LIMIT 1
+            `;
+            return rows[0]?.id ? Number(rows[0].id) : null;
+          },
+          d1: async () =>
+            d1GetSubscriberIdByExternalId(input.shopDomain, String(input.externalId)),
+        });
+      })()
+    : null;
 
   await sql`
     INSERT INTO campaign_clicks (
@@ -10150,16 +10745,28 @@ export const trackAutomationClick = async (input: TrackAutomationClickInput) => 
   const sql = getNeonSql();
   const normalizedExternalId = input.externalId?.trim() || null;
 
-  const subscriberRows = input.externalId
-    ? await sql`
-      SELECT id
-      FROM subscribers
-      WHERE shop_domain = ${input.shopDomain} AND external_id = ${input.externalId}
-      LIMIT 1
-    `
-    : [];
-
-  const subscriberId = subscriberRows[0]?.id ? Number(subscriberRows[0].id) : null;
+  const subscriberId = input.externalId
+    ? await (async () => {
+        const { audienceRead, d1GetSubscriberIdByExternalId } = await import(
+          '@/lib/server/integrations/d1-audience'
+        );
+        return audienceRead<number | null>({
+          label: 'trackAutomationClick.subscriberId',
+          key: (v) => String(v ?? 'null'),
+          neon: async () => {
+            const rows = await sql`
+              SELECT id
+              FROM subscribers
+              WHERE shop_domain = ${input.shopDomain} AND external_id = ${input.externalId}
+              LIMIT 1
+            `;
+            return rows[0]?.id ? Number(rows[0].id) : null;
+          },
+          d1: async () =>
+            d1GetSubscriberIdByExternalId(input.shopDomain, String(input.externalId)),
+        });
+      })()
+    : null;
 
   await sql`
     INSERT INTO automation_clicks (
