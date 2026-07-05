@@ -130,6 +130,8 @@ export const sendCampaignNotification = async (input: SendNotificationInput): Pr
   // Create delivery record in campaign_deliveries table
   const deliveryId = randomUUID();
 
+  const { insertCampaignDelivery } = await import('@/lib/server/integrations/deliveries-data');
+
   // Batch insert delivery records (avoid individual inserts for speed)
   const chunkSize = 1000;
   for (let i = 0; i < totalDeliveries; i += chunkSize) {
@@ -137,17 +139,13 @@ export const sendCampaignNotification = async (input: SendNotificationInput): Pr
 
     await Promise.all(
       chunk.map((token) =>
-        sql`
-          INSERT INTO campaign_deliveries (
-            campaign_id,
-            shop_domain,
-            subscriber_id,
-            token_id,
-            delivered_at
-          )
-          VALUES (${input.campaignId}, ${input.shopDomain}, NULL, ${token.tokenId}, NOW())
-          ON CONFLICT DO NOTHING
-        `,
+        insertCampaignDelivery({
+          campaignId: input.campaignId,
+          shopDomain: input.shopDomain,
+          subscriberId: token.tokenId,
+          tokenId: token.tokenId,
+          deliveredAt: new Date(),
+        }),
       ),
     );
   }
@@ -228,16 +226,21 @@ const queueFcmBatchSend = async (input: {
 export const getCampaignDeliveryStats = async (campaignId: string): Promise<NotificationDeliveryStats> => {
   const sql = getNeonSql();
 
+  // Read the DURABLE per-campaign counters on the campaigns row (maintained during
+  // send / click / attribution) rather than scanning campaign_deliveries. The
+  // detail rows are pruned at scale, so a live scan would report 0 for any campaign
+  // older than the retention window; the campaigns row keeps these totals forever.
   const rows = await sql`
-    SELECT 
-      COUNT(DISTINCT token_id)::INT AS total_tokens,
-      COUNT(CASE WHEN delivered_at IS NOT NULL THEN 1 END)::INT AS delivered_count,
-      COUNT(CASE WHEN clicked_at IS NOT NULL THEN 1 END)::INT AS clicked_count
-    FROM campaign_deliveries
-    WHERE campaign_id = ${campaignId}
+    SELECT
+      COALESCE(target_recipient_count, delivery_count, 0)::INT AS total_tokens,
+      COALESCE(delivery_count, 0)::INT AS delivered_count,
+      COALESCE(click_count, 0)::INT AS clicked_count
+    FROM campaigns
+    WHERE id = ${campaignId}
+    LIMIT 1
   `;
 
-  const row = rows[0];
+  const row = rows[0] ?? {};
   const totalTokens = Number(row.total_tokens ?? 0);
   const deliveredCount = Number(row.delivered_count ?? 0);
   const clickedCount = Number(row.clicked_count ?? 0);
@@ -251,7 +254,7 @@ export const getCampaignDeliveryStats = async (campaignId: string): Promise<Noti
     deliveryStarted: deliveredCount,
     deliveredCount: clickedCount,
     failedCount: 0, // Would need to track separately
-    queuedCount: totalTokens - deliveredCount,
+    queuedCount: Math.max(0, totalTokens - deliveredCount),
     estimatedTimeMinutes,
   };
 };
@@ -262,11 +265,7 @@ export const getCampaignDeliveryStats = async (campaignId: string): Promise<Noti
 export const cancelCampaignDelivery = async (campaignId: string) => {
   const sql = getNeonSql();
 
-  await sql`
-    UPDATE campaign_deliveries
-    SET delivered_at = NULL
-    WHERE campaign_id = ${campaignId}
-      AND clicked_at IS NULL
-      AND converted_at IS NULL
-  `;
+  const { cancelCampaignDeliveries } = await import('@/lib/server/integrations/deliveries-data');
+
+  await cancelCampaignDeliveries(campaignId);
 };
